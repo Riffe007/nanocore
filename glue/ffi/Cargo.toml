@@ -1,0 +1,39 @@
+[package]
+name = "nanocore-ffi"
+version = "0.1.0"
+edition = "2021"
+authors = ["NanoCore Team"]
+license = "MIT"
+description = "High-performance FFI bindings for NanoCore VM"
+
+[lib]
+name = "nanocore_ffi"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+libc = "0.2"
+once_cell = "1.19"
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+memmap2 = "0.9"
+bitflags = "2.4"
+
+[dev-dependencies]
+criterion = "0.5"
+proptest = "1.4"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true
+panic = "abort"
+
+[profile.bench]
+lto = true
+codegen-units = 1
+opt-level = 3
+
+[[bench]]
+name = "vm_benchmarks"
+harness = false

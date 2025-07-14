@@ -1,0 +1,41 @@
+{
+  "name": "nanocore-js",
+  "version": "0.1.0",
+  "description": "JavaScript bindings for NanoCore VM",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "build:wasm": "emcc -O2 -s WASM=1 -s EXPORTED_FUNCTIONS='[\"_nanocore_init\", \"_nanocore_vm_create\", \"_nanocore_vm_destroy\", \"_nanocore_vm_reset\", \"_nanocore_vm_run\", \"_nanocore_vm_step\", \"_nanocore_vm_get_state\", \"_nanocore_vm_get_register\", \"_nanocore_vm_set_register\", \"_nanocore_vm_load_program\", \"_nanocore_vm_read_memory\", \"_nanocore_vm_write_memory\", \"_nanocore_vm_set_breakpoint\", \"_nanocore_vm_clear_breakpoint\", \"_nanocore_vm_get_perf_counter\", \"_nanocore_vm_poll_event\", \"_malloc\", \"_free\"]' -s EXPORTED_RUNTIME_METHODS='[\"ccall\", \"cwrap\", \"getValue\", \"setValue\", \"allocate\", \"intArrayFromString\", \"ALLOC_STACK\", \"ALLOC_STATIC\", \"ALLOC_DYNAMIC\", \"ALLOC_NORMAL\"]' -s ALLOW_MEMORY_GROWTH=1 -s MODULARIZE=1 -s EXPORT_ES6=1 -s EXPORT_NAME='NanoCoreWasm' ../ffi/nanocore_ffi.c -o dist/nanocore.js",
+    "test": "node test/test.js",
+    "clean": "rm -rf dist",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "vm",
+    "emulator",
+    "assembly",
+    "virtual-machine",
+    "risc",
+    "wasm",
+    "webassembly"
+  ],
+  "author": "NanoCore Team",
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "@types/node": "^18.0.0"
+  },
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nanocore/nanocore.git"
+  },
+  "bugs": {
+    "url": "https://github.com/nanocore/nanocore/issues"
+  },
+  "homepage": "https://github.com/nanocore/nanocore"
+}

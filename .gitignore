@@ -1,0 +1,138 @@
+# Build directories
+build/
+dist/
+target/
+node_modules/
+
+# Compiled binaries and libraries
+*.o
+*.so
+*.dylib
+*.dll
+*.a
+*.lib
+*.exe
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.venv/
+venv/
+env/
+ENV/
+
+# Rust
+Cargo.lock
+target/
+**/*.rs.bk
+
+# JavaScript/TypeScript
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+dist/
+coverage/
+.nyc_output/
+.cache/
+.parcel-cache/
+.next/
+out/
+.nuxt/
+.vuepress/dist/
+.serverless/
+.fusebox/
+.dynamodb/
+.tern-port/
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Assembly and binary outputs
+*.bin
+*.hex
+*.asm.o
+*.nc.o
+
+# Test outputs
+test_output/
+*.test
+test_results/
+coverage.xml
+*.gcov
+*.gcda
+*.gcno
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# WebAssembly
+*.wasm
+*.wat
+
+# Temporary files
+*.tmp
+*.temp
+.tmp/
+.temp/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Backup files
+*.bak
+*.backup
+*.old
+*.orig
+
+# Documentation build
+docs/_build/
+docs/.doctrees/
+
+# NASM listings
+*.lst
+
+# Emscripten
+*.js.mem
+*.wast
+
+# Local environment
+.env
+.env.local
+.env.*.local
+
+# Package manager lock files (keep package-lock.json for reproducible builds)
+# Uncomment if you want to ignore lock files
+# package-lock.json
+# yarn.lock
+# Cargo.lock

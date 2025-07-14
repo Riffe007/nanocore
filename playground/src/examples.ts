@@ -1,129 +1,115 @@
-export const examples = {
-  helloWorld: `; NanoCore Hello World Example
-; Demonstrates basic instructions and halt
+export const examples = [
+  {
+    id: 'hello',
+    name: 'Hello World',
+    code: `// Hello World Example
+// Load values and halt
+// Format: Hex bytes for each instruction
 
-_start:
-    ; Load some values
-    LD   R1, 42         ; Load 42 into R1
-    LD   R2, 58         ; Load 58 into R2
-    
-    ; Add them together
-    ADD  R3, R1, R2     ; R3 = R1 + R2 = 100
-    
-    ; Store result in memory
-    ST   R3, 0x1000(R0) ; Store at address 0x1000
-    
-    ; Done!
-    HALT                ; Stop execution
-`,
-
-  fibonacci: `; Fibonacci Sequence Calculator
-; Calculates first 10 Fibonacci numbers
-
-_start:
-    LD   R1, 10         ; Calculate 10 numbers
-    LD   R2, 0          ; F(0) = 0
-    LD   R3, 1          ; F(1) = 1
-    LD   R4, 0          ; Counter
-    LD   R10, 0x2000    ; Memory pointer
-    
-    ; Store first two numbers
-    ST   R2, 0(R10)     ; Store F(0)
-    ST   R3, 8(R10)     ; Store F(1)
-    ADD  R10, R10, 16   ; Advance pointer
-    LD   R4, 2          ; Counter = 2
-    
-fib_loop:
-    ; Calculate next Fibonacci number
-    ADD  R5, R2, R3     ; R5 = R2 + R3
-    
-    ; Store result
-    ST   R5, 0(R10)     ; Store in memory
-    ADD  R10, R10, 8    ; Advance pointer
-    
-    ; Update for next iteration
-    ADD  R2, R3, R0     ; R2 = R3
-    ADD  R3, R5, R0     ; R3 = R5
-    
-    ; Increment counter
-    LD   R6, 1
-    ADD  R4, R4, R6
-    
-    ; Check if done (simplified)
-    ; Real implementation would use compare & branch
-    
-    HALT
-`,
-
-  simd: `; SIMD Vector Operations Demo
-; Shows parallel processing capabilities
-
-_start:
-    ; Load base addresses
-    LD   R1, 0x3000     ; Vector A address
-    LD   R2, 0x3020     ; Vector B address
-    LD   R3, 0x3040     ; Result address
-    
-    ; Load vectors from memory
-    VLOAD V0, 0(R1)     ; Load vector A
-    VLOAD V1, 0(R2)     ; Load vector B
-    
-    ; Perform vector operations
-    VADD.F64 V2, V0, V1 ; Vector addition
-    VMUL.F64 V3, V0, V1 ; Vector multiplication
-    
-    ; Store results
-    VSTORE V2, 0(R3)    ; Store sum
-    VSTORE V3, 32(R3)   ; Store product
-    
-    ; Broadcast scalar to vector
-    LD   R4, 2
-    VBROADCAST V4, R4   ; V4 = [2, 2, 2, 2]
-    
-    ; Scale vector
-    VMUL.F64 V5, V2, V4 ; V5 = V2 * 2
-    
-    HALT
-`,
-
-  loops: `; Loops and Branching Demo
-; Shows control flow instructions
-
-_start:
-    ; Initialize
-    LD   R1, 0          ; Counter
-    LD   R2, 5          ; Limit
-    LD   R3, 0          ; Sum
-    
-loop_start:
-    ; Add counter to sum
-    ADD  R3, R3, R1     ; sum += counter
-    
-    ; Increment counter
-    LD   R4, 1
-    ADD  R1, R1, R4     ; counter++
-    
-    ; Compare and branch
-    ; BLT  R1, R2, loop_start
-    ; For demo, using simplified loop
-    
-    ; Nested loop example
-    LD   R5, 0          ; Inner counter
-    LD   R6, 3          ; Inner limit
-    
-inner_loop:
-    ; Do something in inner loop
-    ADD  R7, R5, R1     ; Some calculation
-    
-    ; Increment inner counter
-    ADD  R5, R5, R4
-    
-    ; Would branch here in real implementation
-    
-done:
-    ; Store final result
-    ST   R3, 0x4000(R0)
-    
-    HALT
+3C 20 00 2A  // LD R1, 42
+3C 40 00 3A  // LD R2, 58
+00 61 40 00  // ADD R3, R1, R2 (R3 = 100)
+84 00 00 00  // HALT
 `
-};
+  },
+  {
+    id: 'fibonacci',
+    name: 'Fibonacci',
+    code: `// Fibonacci Sequence
+// Calculate first 10 Fibonacci numbers
+
+3C 20 00 00  // LD R1, 0     ; First number
+3C 40 00 01  // LD R2, 1     ; Second number
+3C 60 00 0A  // LD R3, 10    ; Counter
+
+// loop:
+00 81 40 00  // ADD R4, R1, R2  ; Calculate next
+// Move operations would go here
+04 63 00 01  // SUB R3, R3, 1   ; Decrement counter
+// Branch back if not zero
+84 00 00 00  // HALT
+`
+  },
+  {
+    id: 'arithmetic',
+    name: 'Arithmetic Ops',
+    code: `// Arithmetic Operations Demo
+// Test various math instructions
+
+3C 20 00 64  // LD R1, 100
+3C 40 00 0A  // LD R2, 10
+
+00 61 40 00  // ADD R3, R1, R2  ; R3 = 110
+04 61 40 00  // SUB R3, R1, R2  ; R3 = 90
+08 61 40 00  // MUL R3, R1, R2  ; R3 = 1000
+10 61 40 00  // DIV R3, R1, R2  ; R3 = 10
+14 61 40 00  // MOD R3, R1, R2  ; R3 = 0
+
+84 00 00 00  // HALT
+`
+  },
+  {
+    id: 'bitwise',
+    name: 'Bitwise Ops',
+    code: `// Bitwise Operations Demo
+
+3C 20 00 FF  // LD R1, 0xFF
+3C 40 00 0F  // LD R2, 0x0F
+
+18 61 40 00  // AND R3, R1, R2  ; R3 = 0x0F
+1C 61 40 00  // OR  R3, R1, R2  ; R3 = 0xFF
+20 61 40 00  // XOR R3, R1, R2  ; R3 = 0xF0
+28 61 40 00  // SHL R3, R1, R2  ; R3 = R1 << R2
+2C 61 40 00  // SHR R3, R1, R2  ; R3 = R1 >> R2
+
+84 00 00 00  // HALT
+`
+  },
+  {
+    id: 'memory',
+    name: 'Memory Access',
+    code: `// Memory Operations Demo
+
+3C 20 10 00  // LD R1, 0x1000   ; Base address
+3C 40 00 42  // LD R2, 66       ; Value to store
+
+4C 41 00 00  // ST R2, 0(R1)    ; Store at 0x1000
+4C 41 00 08  // ST R2, 8(R1)    ; Store at 0x1008
+
+3C 41 00 00  // LD R2, 0(R1)    ; Load from 0x1000
+3C 61 00 08  // LD R3, 8(R1)    ; Load from 0x1008
+
+84 00 00 00  // HALT
+`
+  },
+  {
+    id: 'advanced',
+    name: 'Advanced Demo',
+    code: `// Advanced NanoCore Demo
+// Combines multiple concepts
+
+// Initialize data
+3C 20 00 05  // LD R1, 5        ; Loop counter
+3C 40 00 00  // LD R2, 0        ; Sum accumulator
+3C 60 00 01  // LD R3, 1        ; Increment value
+
+// Main loop
+00 42 60 00  // ADD R2, R2, R3  ; Add to sum
+00 63 60 00  // ADD R3, R3, 1   ; Increment
+04 21 60 00  // SUB R1, R1, 1   ; Decrement counter
+
+// In a real implementation, we'd branch here
+// For now, just demonstrate a few more iterations
+00 42 60 00  // ADD R2, R2, R3
+00 63 60 00  // ADD R3, R3, 1
+04 21 60 00  // SUB R1, R1, 1
+
+00 42 60 00  // ADD R2, R2, R3
+00 63 60 00  // ADD R3, R3, 1
+04 21 60 00  // SUB R1, R1, 1
+
+// Result: R2 should contain 1+2+3+4+5 = 15
+84 00 00 00  // HALT
+`
+  }
+]

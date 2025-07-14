@@ -1,304 +1,234 @@
-import React, { useState, useEffect, useRef } from 'react';
-import Editor from '@monaco-editor/react';
-import { Toaster, toast } from 'react-hot-toast';
-import { Play, Pause, RotateCcw, Download, Upload, Cpu, Zap, BarChart } from 'lucide-react';
-import { NanoCoreVM, AssemblyError } from './wasm/nanocore';
-import { RegisterView } from './components/RegisterView';
-import { MemoryView } from './components/MemoryView';
-import { PerformanceView } from './components/PerformanceView';
-import { examples } from './examples';
+import React, { useState, useEffect, useCallback } from 'react'
+import { Toaster, toast } from 'react-hot-toast'
 
-interface VMState {
-  pc: number;
-  sp: number;
-  flags: number;
-  registers: number[];
-  vectorRegisters: number[][];
-  performance: {
-    instructions: number;
-    cycles: number;
-    cacheHits: number;
-    cacheMisses: number;
-  };
-}
+import { CodeEditor } from './components/CodeEditor'
+import { RegisterView } from './components/RegisterView'
+import { MemoryView } from './components/MemoryView'
+import { PerformanceView } from './components/PerformanceView'
+import { ControlPanel } from './components/ControlPanel'
+import { ExampleSelector } from './components/ExampleSelector'
+import { VMVisualizer } from './components/VMVisualizer'
+
+import { NanoCoreVM } from './services/vm'
+import { examples } from './examples'
 
 function App() {
-  const [code, setCode] = useState(examples.helloWorld);
-  const [isRunning, setIsRunning] = useState(false);
-  const [vmState, setVmState] = useState<VMState | null>(null);
-  const [output, setOutput] = useState<string[]>([]);
-  const [selectedExample, setSelectedExample] = useState('helloWorld');
-  const vmRef = useRef<NanoCoreVM | null>(null);
-  const intervalRef = useRef<number | null>(null);
+  const [code, setCode] = useState(examples[0].code)
+  const [vm, setVM] = useState<NanoCoreVM | null>(null)
+  const [isRunning, setIsRunning] = useState(false)
+  const [vmState, setVmState] = useState<any>(null)
+  const [selectedExample, setSelectedExample] = useState(examples[0].id)
+  const [activeTab, setActiveTab] = useState<'registers' | 'memory' | 'performance'>('registers')
 
+  // Initialize VM
   useEffect(() => {
-    // Initialize VM
-    const initVM = async () => {
-      try {
-        const vm = await NanoCoreVM.init();
-        vmRef.current = vm;
-        setVmState(vm.getState());
-        toast.success('VM initialized');
-      } catch (error) {
-        toast.error('Failed to initialize VM');
-        console.error(error);
-      }
-    };
-    
-    initVM();
-    
-    return () => {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-      }
-    };
-  }, []);
+    NanoCoreVM.create().then(newVM => {
+      setVM(newVM)
+      updateVMState(newVM)
+      toast.success('VM initialized')
+    }).catch(err => {
+      console.error('Failed to initialize VM:', err)
+      toast.error('Failed to initialize VM')
+    })
+  }, [])
 
-  const handleAssemble = async () => {
-    if (!vmRef.current) return;
+  const updateVMState = useCallback(async (vm: NanoCoreVM) => {
+    try {
+      const state = await vm.getState()
+      setVmState(state)
+    } catch (err) {
+      console.error('Failed to get VM state:', err)
+    }
+  }, [])
+
+  const handleAssemble = useCallback(async () => {
+    if (!vm) return
     
     try {
-      const bytecode = await vmRef.current.assemble(code);
-      vmRef.current.loadProgram(bytecode);
-      setVmState(vmRef.current.getState());
-      toast.success(`Assembled ${bytecode.length} bytes`);
-      addOutput(`[ASSEMBLED] ${bytecode.length} bytes`);
-    } catch (error) {
-      if (error instanceof AssemblyError) {
-        toast.error(`Assembly error: ${error.message}`);
-        addOutput(`[ERROR] ${error.message}`);
-      } else {
-        toast.error('Unknown assembly error');
-      }
-    }
-  };
-
-  const handleRun = () => {
-    if (!vmRef.current || isRunning) return;
-    
-    setIsRunning(true);
-    addOutput('[RUNNING]');
-    
-    // Run VM in steps with visualization
-    let steps = 0;
-    intervalRef.current = setInterval(() => {
-      if (!vmRef.current) return;
+      // Simple assembly - convert hex string to bytes
+      const lines = code.split('\n').filter(line => line.trim())
+      const bytes: number[] = []
       
-      const result = vmRef.current.step();
-      setVmState(vmRef.current.getState());
-      steps++;
-      
-      if (result.halted || result.error || steps > 1000) {
-        handleStop();
-        if (result.halted) {
-          addOutput('[HALTED]');
-        } else if (result.error) {
-          addOutput(`[ERROR] ${result.error}`);
-        } else {
-          addOutput('[TIMEOUT] Execution limit reached');
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (trimmed.startsWith('//') || trimmed === '') continue
+        
+        // Extract hex bytes before comments
+        const hexPart = trimmed.split('//')[0].trim()
+        if (!hexPart) continue
+        
+        // Parse hex bytes (e.g., "3C 20 00 2A")
+        const hexBytes = hexPart.split(/\s+/)
+        for (const hex of hexBytes) {
+          const byte = parseInt(hex, 16)
+          if (!isNaN(byte) && byte >= 0 && byte <= 255) {
+            bytes.push(byte)
+          }
         }
       }
       
-      // Handle any output from the VM
-      if (result.output) {
-        addOutput(result.output);
+      if (bytes.length === 0) {
+        toast.error('No valid instructions found')
+        return
       }
-    }, 100); // 10 steps per second for visualization
-  };
-
-  const handleStep = () => {
-    if (!vmRef.current || isRunning) return;
-    
-    const result = vmRef.current.step();
-    setVmState(vmRef.current.getState());
-    
-    if (result.output) {
-      addOutput(result.output);
+      
+      if (bytes.length % 4 !== 0) {
+        toast('Instruction length not aligned to 4 bytes', {
+          icon: '⚠️',
+        })
+      }
+      
+      await vm.loadProgram(new Uint8Array(bytes))
+      await updateVMState(vm)
+      toast.success(`Loaded ${bytes.length} bytes`)
+    } catch (error) {
+      console.error('Assembly error:', error)
+      toast.error('Failed to assemble code')
     }
+  }, [vm, code, updateVMState])
+
+  const handleRun = useCallback(async () => {
+    if (!vm || isRunning) return
     
-    if (result.halted) {
-      addOutput('[HALTED]');
-    } else if (result.error) {
-      addOutput(`[ERROR] ${result.error}`);
+    setIsRunning(true)
+    try {
+      const result = await vm.run(10000) // Max 10k instructions
+      await updateVMState(vm)
+      if (result.halted) {
+        toast.success('Program halted')
+      } else if (result.error) {
+        toast.error(`Runtime error: ${result.error}`)
+      }
+    } catch (err) {
+      console.error('Execution error:', err)
+      toast.error('Execution failed')
+    } finally {
+      setIsRunning(false)
     }
-  };
+  }, [vm, isRunning, updateVMState])
 
-  const handleStop = () => {
-    setIsRunning(false);
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    }
-  };
-
-  const handleReset = () => {
-    if (!vmRef.current) return;
+  const handleStep = useCallback(async () => {
+    if (!vm || isRunning) return
     
-    handleStop();
-    vmRef.current.reset();
-    setVmState(vmRef.current.getState());
-    setOutput([]);
-    toast.success('VM reset');
-  };
+    try {
+      const result = await vm.step()
+      await updateVMState(vm)
+      if (result.halted) {
+        toast('Program halted', {
+          icon: 'ℹ️',
+        })
+      } else if (result.error) {
+        toast.error(`Step error: ${result.error}`)
+      }
+    } catch (err) {
+      console.error('Step error:', err)
+      toast.error('Step failed')
+    }
+  }, [vm, isRunning, updateVMState])
 
-  const addOutput = (line: string) => {
-    setOutput(prev => [...prev, `${new Date().toLocaleTimeString()}: ${line}`]);
-  };
+  const handleReset = useCallback(async () => {
+    if (!vm) return
+    
+    try {
+      await vm.reset()
+      await updateVMState(vm)
+      toast.success('VM reset')
+    } catch (err) {
+      console.error('Reset error:', err)
+      toast.error('Reset failed')
+    }
+  }, [vm, updateVMState])
 
-  const loadExample = (exampleKey: string) => {
-    setSelectedExample(exampleKey);
-    setCode(examples[exampleKey as keyof typeof examples]);
-    handleReset();
-  };
+  const handleExampleChange = useCallback((exampleId: string) => {
+    const example = examples.find(e => e.id === exampleId)
+    if (example) {
+      setCode(example.code)
+      setSelectedExample(exampleId)
+    }
+  }, [])
 
   return (
-    <div className="min-h-screen bg-gray-900 text-gray-100">
-      <Toaster position="top-right" />
+    <div className="h-screen w-screen flex flex-col bg-gray-900 text-gray-100">
+      <Toaster position="bottom-right" />
       
       {/* Header */}
-      <header className="bg-gray-800 border-b border-gray-700 px-4 py-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-3">
-            <Cpu className="w-8 h-8 text-blue-400" />
-            <h1 className="text-2xl font-bold">NanoCore Playground</h1>
-            <span className="text-sm text-gray-400">High-Performance Assembly VM</span>
-          </div>
-          
-          <div className="flex items-center space-x-4">
-            <select
-              value={selectedExample}
-              onChange={(e) => loadExample(e.target.value)}
-              className="bg-gray-700 px-3 py-1 rounded border border-gray-600"
-            >
-              <option value="helloWorld">Hello World</option>
-              <option value="fibonacci">Fibonacci</option>
-              <option value="simd">SIMD Demo</option>
-              <option value="loops">Loops & Branches</option>
-            </select>
-            
-            <button
-              onClick={handleAssemble}
-              className="btn btn-secondary"
-            >
-              Assemble
-            </button>
-            
-            <div className="flex items-center space-x-2">
-              <button
-                onClick={handleRun}
-                disabled={isRunning}
-                className="btn btn-primary"
-              >
-                <Play className="w-4 h-4 mr-1" />
-                Run
-              </button>
-              
-              <button
-                onClick={handleStep}
-                disabled={isRunning}
-                className="btn btn-secondary"
-              >
-                Step
-              </button>
-              
-              <button
-                onClick={handleStop}
-                disabled={!isRunning}
-                className="btn btn-secondary"
-              >
-                <Pause className="w-4 h-4" />
-              </button>
-              
-              <button
-                onClick={handleReset}
-                className="btn btn-secondary"
-              >
-                <RotateCcw className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
+      <header className="bg-gray-800 border-b border-gray-700 px-4 py-2 flex items-center justify-between">
+        <div className="flex items-center space-x-4">
+          <h1 className="text-xl font-bold">NanoCore Playground</h1>
+          <ExampleSelector 
+            value={selectedExample} 
+            onChange={handleExampleChange} 
+          />
         </div>
+        <ControlPanel
+          onAssemble={handleAssemble}
+          onRun={handleRun}
+          onStep={handleStep}
+          onReset={handleReset}
+          isRunning={isRunning}
+        />
       </header>
 
       {/* Main Content */}
-      <div className="flex h-[calc(100vh-64px)]">
-        {/* Code Editor */}
+      <div className="flex-1 flex overflow-hidden">
+        {/* Left Panel - Code Editor */}
         <div className="w-1/2 border-r border-gray-700">
-          <div className="h-full flex flex-col">
-            <div className="bg-gray-800 px-4 py-2 border-b border-gray-700">
-              <h2 className="font-semibold">Assembly Code</h2>
-            </div>
-            <div className="flex-1">
-              <Editor
-                theme="vs-dark"
-                language="asm"
-                value={code}
-                onChange={(value) => setCode(value || '')}
-                options={{
-                  minimap: { enabled: false },
-                  fontSize: 14,
-                  lineNumbers: 'on',
-                  rulers: [80],
-                  wordWrap: 'off',
-                }}
-              />
-            </div>
-          </div>
+          <CodeEditor value={code} onChange={setCode} />
         </div>
 
-        {/* Right Panel */}
+        {/* Right Panel - VM State */}
         <div className="w-1/2 flex flex-col">
-          {/* VM State */}
-          <div className="flex-1 overflow-hidden">
-            <div className="h-full flex flex-col">
-              {/* Tabs */}
-              <div className="bg-gray-800 px-4 py-2 border-b border-gray-700 flex space-x-4">
-                <button className="tab tab-active">Registers</button>
-                <button className="tab">Memory</button>
-                <button className="tab">Performance</button>
-              </div>
-              
-              {/* Tab Content */}
-              <div className="flex-1 overflow-auto p-4">
-                {vmState && (
-                  <>
-                    <RegisterView state={vmState} />
-                    <div className="mt-6">
-                      <h3 className="font-semibold mb-2 flex items-center">
-                        <Zap className="w-4 h-4 mr-2 text-yellow-400" />
-                        Performance Counters
-                      </h3>
-                      <PerformanceView performance={vmState.performance} />
-                    </div>
-                  </>
-                )}
-              </div>
-            </div>
+          {/* Tabs */}
+          <div className="bg-gray-800 px-4 py-2 border-b border-gray-700 flex space-x-4">
+            <button 
+              className={`px-3 py-1 rounded ${activeTab === 'registers' ? 'bg-gray-700 text-white' : 'text-gray-400 hover:text-white'}`}
+              onClick={() => setActiveTab('registers')}
+            >
+              Registers
+            </button>
+            <button 
+              className={`px-3 py-1 rounded ${activeTab === 'memory' ? 'bg-gray-700 text-white' : 'text-gray-400 hover:text-white'}`}
+              onClick={() => setActiveTab('memory')}
+            >
+              Memory
+            </button>
+            <button 
+              className={`px-3 py-1 rounded ${activeTab === 'performance' ? 'bg-gray-700 text-white' : 'text-gray-400 hover:text-white'}`}
+              onClick={() => setActiveTab('performance')}
+            >
+              Performance
+            </button>
           </div>
 
-          {/* Console Output */}
-          <div className="h-1/3 border-t border-gray-700">
-            <div className="h-full flex flex-col">
-              <div className="bg-gray-800 px-4 py-2 border-b border-gray-700 flex justify-between">
-                <h2 className="font-semibold">Console Output</h2>
-                <button
-                  onClick={() => setOutput([])}
-                  className="text-sm text-gray-400 hover:text-gray-200"
-                >
-                  Clear
-                </button>
+          {/* Tab Content */}
+          <div className="flex-1 flex overflow-hidden">
+            {activeTab === 'registers' && (
+              <div className="flex flex-1">
+                <div className="w-1/2 border-r border-gray-700">
+                  <RegisterView state={vmState} />
+                </div>
+                <div className="w-1/2">
+                  <VMVisualizer state={vmState} />
+                </div>
               </div>
-              <div className="flex-1 overflow-auto p-4 font-mono text-sm">
-                {output.map((line, i) => (
-                  <div key={i} className="text-green-400">{line}</div>
-                ))}
+            )}
+            
+            {activeTab === 'memory' && (
+              <div className="flex-1">
+                <MemoryView vm={vm} state={vmState} />
               </div>
-            </div>
+            )}
+            
+            {activeTab === 'performance' && (
+              <div className="flex-1">
+                <PerformanceView state={vmState} />
+              </div>
+            )}
           </div>
         </div>
       </div>
     </div>
-  );
+  )
 }
 
-export default App;
+export default App

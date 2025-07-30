@@ -1,138 +1,313 @@
-; NanoCore Pipeline Implementation
-; 5-stage pipeline with hazard detection and forwarding
-;
-; Pipeline stages:
-; 1. IF (Instruction Fetch)
-; 2. ID (Instruction Decode)
-; 3. EX (Execute)
-; 4. MEM (Memory Access)
-; 5. WB (Write Back)
+; NanoCore Pipeline Module
+; Handles 5-stage pipeline: Fetch, Decode, Execute, Memory, Writeback
 
 BITS 64
 SECTION .text
 
-; Pipeline register structure
-struc pipeline_reg
-    .valid:     resb 1      ; Stage valid flag
-    .pc:        resq 1      ; Program counter
-    .inst:      resd 1      ; Instruction
-    .opcode:    resb 1      ; Decoded opcode
-    .rd:        resb 1      ; Destination register
-    .rs1:       resb 1      ; Source register 1
-    .rs2:       resb 1      ; Source register 2
-    .imm:       resq 1      ; Immediate value
-    .alu_out:   resq 1      ; ALU result
-    .mem_data:  resq 1      ; Memory data
-    .branch:    resb 1      ; Branch taken flag
-    .mem_op:    resb 1      ; Memory operation type
-    .padding:   resb 6      ; Alignment padding
-endstruc
+; External symbols
+extern vm_state
+extern memory_read
+extern memory_write
 
 ; Constants
-%define PIPELINE_STAGES 5
-%define BRANCH_PRED_SIZE 1024
-%define BTB_SIZE 256
+%define VM_PC 0
+%define VM_FLAGS 16
+%define VM_GPRS 24
+%define VM_VREGS (VM_GPRS + 32 * 8)
+%define VM_PERF (VM_VREGS + 16 * 32)
 
-; Hazard types
-%define HAZ_NONE 0
-%define HAZ_DATA 1
-%define HAZ_CONTROL 2
-%define HAZ_STRUCT 3
+; Pipeline stage constants
+%define STAGE_FETCH 0
+%define STAGE_DECODE 1
+%define STAGE_EXECUTE 2
+%define STAGE_MEMORY 3
+%define STAGE_WRITEBACK 4
 
-; Memory operation types
-%define MEM_NONE 0
-%define MEM_LOAD 1
-%define MEM_STORE 2
+; Pipeline structure
+struc pipeline_stage
+    .valid: resb 1          ; Stage valid
+    .opcode: resb 1         ; Instruction opcode
+    .rd: resb 1             ; Destination register
+    .rs1: resb 1            ; Source register 1
+    .rs2: resb 1            ; Source register 2
+    .imm: resd 1            ; Immediate value
+    .pc: resq 1             ; Program counter
+    .result: resq 1         ; Execution result
+    .mem_addr: resq 1       ; Memory address
+    .mem_data: resq 1       ; Memory data
+    .stall: resb 1          ; Pipeline stall
+    .flush: resb 1          ; Pipeline flush
+    .reserved: resb 1       ; Alignment
+endstruc
+
+; Pipeline state
+struc pipeline_state
+    .stages: resb pipeline_stage_size * 5  ; 5 pipeline stages
+    .branch_predictor: resq 1024           ; 2-bit saturating counters
+    .return_stack: resq 16                 ; Return address stack
+    .ras_ptr: resd 1                       ; Return stack pointer
+    .reserved: resd 1                      ; Alignment
+endstruc
 
 ; Global symbols
 global pipeline_init
+global pipeline_fetch
+global pipeline_decode
+global pipeline_execute
+global pipeline_memory
+global pipeline_writeback
 global pipeline_step
 global pipeline_flush
 global pipeline_stall
-global detect_hazards
-global forward_data
 global branch_predict
 global branch_update
 
-; External symbols
-extern vm_state
-extern fetch_instruction
-extern opcode_table
-extern memory_read
-extern memory_write
-extern update_flags
-
 SECTION .bss
 align 64
-; Pipeline registers
-if_id:  resb pipeline_reg_size
-id_ex:  resb pipeline_reg_size
-ex_mem: resb pipeline_reg_size
-mem_wb: resb pipeline_reg_size
+pipeline_state: resb pipeline_state_size
 
-; Branch prediction structures
-branch_history: resb BRANCH_PRED_SIZE   ; 2-bit saturating counters
-btb_tags: resq BTB_SIZE                 ; Branch target buffer tags
-btb_targets: resq BTB_SIZE              ; Branch targets
-global_history: resb 1                  ; Global branch history
-
-; Pipeline control
-stall_cycles: resq 1
-flush_flag: resb 1
-forwarding_enabled: resb 1
-
-; Statistics
-pipeline_stalls: resq 1
-pipeline_flushes: resq 1
-branch_predictions: resq 1
-branch_mispredicts: resq 1
+SECTION .data
+align 64
+; Opcode dispatch table
+opcode_table:
+    dq execute_add      ; 0x00
+    dq execute_sub      ; 0x01
+    dq execute_mul      ; 0x02
+    dq execute_mulh     ; 0x03
+    dq execute_div      ; 0x04
+    dq execute_mod      ; 0x05
+    dq execute_and      ; 0x06
+    dq execute_or       ; 0x07
+    dq execute_xor      ; 0x08
+    dq execute_not      ; 0x09
+    dq execute_shl      ; 0x0A
+    dq execute_shr      ; 0x0B
+    dq execute_sar      ; 0x0C
+    dq execute_rol      ; 0x0D
+    dq execute_ror      ; 0x0E
+    dq execute_ld       ; 0x0F
+    dq execute_lw       ; 0x10
+    dq execute_lh       ; 0x11
+    dq execute_lb       ; 0x12
+    dq execute_st       ; 0x13
+    dq execute_sw       ; 0x14
+    dq execute_sh       ; 0x15
+    dq execute_sb       ; 0x16
+    dq execute_beq      ; 0x17
+    dq execute_bne      ; 0x18
+    dq execute_blt      ; 0x19
+    dq execute_bge      ; 0x1A
+    dq execute_bltu     ; 0x1B
+    dq execute_bgeu     ; 0x1C
+    dq execute_jmp      ; 0x1D
+    dq execute_call     ; 0x1E
+    dq execute_ret      ; 0x1F
+    dq execute_syscall  ; 0x20
+    dq execute_halt     ; 0x21
+    dq execute_nop      ; 0x22
+    dq execute_cpuid    ; 0x23
+    dq execute_rdcycle  ; 0x24
+    dq execute_rdperf   ; 0x25
+    dq execute_prefetch ; 0x26
+    dq execute_clflush  ; 0x27
+    dq execute_fence    ; 0x28
+    dq execute_lr       ; 0x29
+    dq execute_sc       ; 0x2A
+    dq execute_amoswap  ; 0x2B
+    dq execute_amoadd   ; 0x2C
+    dq execute_amoand   ; 0x2D
+    dq execute_amoor    ; 0x2E
+    dq execute_amoxor   ; 0x2F
+    dq execute_vadd_f64 ; 0x30
+    dq execute_vsub_f64 ; 0x31
+    dq execute_vmul_f64 ; 0x32
+    dq execute_vfma_f64 ; 0x33
+    dq execute_vload    ; 0x34
+    dq execute_vstore   ; 0x35
+    dq execute_vbroadcast ; 0x36
+    times 201 dq execute_illegal  ; Fill rest with illegal instruction handler
 
 SECTION .text
 
 ; Initialize pipeline
+global pipeline_init
 pipeline_init:
     push rbp
     mov rbp, rsp
-    push rdi
-    push rcx
     
-    ; Clear pipeline registers
-    lea rdi, [if_id]
+    ; Clear pipeline state
+    lea rdi, [pipeline_state]
     xor eax, eax
-    mov ecx, pipeline_reg_size * 4 / 8
+    mov ecx, pipeline_state_size / 8
     rep stosq
     
-    ; Initialize branch predictor
-    lea rdi, [branch_history]
-    mov al, 0x55            ; Weakly taken
-    mov ecx, BRANCH_PRED_SIZE
-    rep stosb
+    ; Initialize return address stack pointer
+    mov dword [pipeline_state + pipeline_state.ras_ptr], 0
     
-    ; Clear BTB
-    lea rdi, [btb_tags]
-    xor eax, eax
-    mov ecx, BTB_SIZE * 2
-    rep stosq
-    
-    ; Reset control state
-    mov qword [stall_cycles], 0
-    mov byte [flush_flag], 0
-    mov byte [forwarding_enabled], 1
-    mov byte [global_history], 0
-    
-    ; Clear statistics
-    lea rdi, [pipeline_stalls]
-    xor eax, eax
-    mov ecx, 4
-    rep stosq
-    
-    pop rcx
-    pop rdi
     pop rbp
     ret
 
-; Execute one pipeline cycle
-pipeline_step:
+; Fetch stage
+; Input: None
+; Output: RAX = 0 on success, error code otherwise
+pipeline_fetch:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    
+    ; Get current PC
+    lea r12, [vm_state]
+    mov r13, [r12 + VM_PC]
+    
+    ; Check if fetch stage is stalled
+    lea rbx, [pipeline_state + pipeline_state.stages + STAGE_FETCH * pipeline_stage_size]
+    cmp byte [rbx + pipeline_stage.stall], 0
+    jne .stalled
+    
+    ; Fetch instruction from memory
+    mov rdi, r13
+    lea rsi, [rbx + pipeline_stage.opcode]  ; Use opcode field as temp buffer
+    mov rdx, 4  ; 32-bit instruction
+    call memory_read
+    test rax, rax
+    jnz .error
+    
+    ; Store instruction in decode stage
+    lea rbx, [pipeline_state + pipeline_state.stages + STAGE_DECODE * pipeline_stage_size]
+    mov eax, [rbx + pipeline_stage.opcode]  ; Get fetched instruction
+    mov [rbx + pipeline_stage.opcode], eax  ; Store opcode
+    mov [rbx + pipeline_stage.pc], r13      ; Store PC
+    mov byte [rbx + pipeline_stage.valid], 1 ; Mark as valid
+    
+    ; Advance PC
+    add r13, 4
+    mov [r12 + VM_PC], r13
+    
+    ; Update performance counter
+    inc qword [r12 + VM_PERF + 0 * 8]  ; Instruction fetch counter
+    
+    xor eax, eax
+    jmp .done
+    
+.stalled:
+    xor eax, eax
+    jmp .done
+    
+.error:
+    mov eax, -1
+    
+.done:
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+
+; Decode stage
+; Input: None
+; Output: RAX = 0 on success, error code otherwise
+pipeline_decode:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    
+    ; Get decode stage
+    lea rbx, [pipeline_state + pipeline_state.stages + STAGE_DECODE * pipeline_stage_size]
+    
+    ; Check if stage is valid
+    cmp byte [rbx + pipeline_stage.valid], 0
+    je .no_instruction
+    
+    ; Check if stalled
+    cmp byte [rbx + pipeline_stage.stall], 0
+    jne .stalled
+    
+    ; Decode instruction
+    mov eax, [rbx + pipeline_stage.opcode]
+    
+    ; Extract opcode (bits 31-26)
+    mov ecx, eax
+    shr ecx, 26
+    and ecx, 0x3F
+    mov [rbx + pipeline_stage.opcode], cl
+    
+    ; Extract rd (bits 25-21)
+    mov ecx, eax
+    shr ecx, 21
+    and ecx, 0x1F
+    mov [rbx + pipeline_stage.rd], cl
+    
+    ; Extract rs1 (bits 20-16)
+    mov ecx, eax
+    shr ecx, 16
+    and ecx, 0x1F
+    mov [rbx + pipeline_stage.rs1], cl
+    
+    ; Extract rs2 (bits 15-11)
+    mov ecx, eax
+    shr ecx, 11
+    and ecx, 0x1F
+    mov [rbx + pipeline_stage.rs2], cl
+    
+    ; Extract immediate (bits 15-0)
+    mov ecx, eax
+    and ecx, 0xFFFF
+    mov [rbx + pipeline_stage.imm], ecx
+    
+    ; Check for data hazards
+    call check_data_hazards
+    test rax, rax
+    jnz .stall_for_hazard
+    
+    ; Move to execute stage
+    lea r12, [pipeline_state + pipeline_state.stages + STAGE_EXECUTE * pipeline_stage_size]
+    mov al, [rbx + pipeline_stage.opcode]
+    mov [r12 + pipeline_stage.opcode], al
+    mov al, [rbx + pipeline_stage.rd]
+    mov [r12 + pipeline_stage.rd], al
+    mov al, [rbx + pipeline_stage.rs1]
+    mov [r12 + pipeline_stage.rs1], al
+    mov al, [rbx + pipeline_stage.rs2]
+    mov [r12 + pipeline_stage.rs2], al
+    mov eax, [rbx + pipeline_stage.imm]
+    mov [r12 + pipeline_stage.imm], eax
+    mov rax, [rbx + pipeline_stage.pc]
+    mov [r12 + pipeline_stage.pc], rax
+    mov byte [r12 + pipeline_stage.valid], 1
+    
+    ; Clear decode stage
+    mov byte [rbx + pipeline_stage.valid], 0
+    
+    xor eax, eax
+    jmp .done
+    
+.stall_for_hazard:
+    mov byte [rbx + pipeline_stage.stall], 1
+    xor eax, eax
+    jmp .done
+    
+.stalled:
+    xor eax, eax
+    jmp .done
+    
+.no_instruction:
+    xor eax, eax
+    
+.done:
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+
+; Execute stage
+; Input: None
+; Output: RAX = 0 on success, error code otherwise
+pipeline_execute:
     push rbp
     mov rbp, rsp
     push rbx
@@ -141,49 +316,64 @@ pipeline_step:
     push r14
     push r15
     
-    ; Check for stalls
-    cmp qword [stall_cycles], 0
-    je .no_stall
-    dec qword [stall_cycles]
-    inc qword [pipeline_stalls]
+    ; Get execute stage
+    lea rbx, [pipeline_state + pipeline_state.stages + STAGE_EXECUTE * pipeline_stage_size]
+    
+    ; Check if stage is valid
+    cmp byte [rbx + pipeline_stage.valid], 0
+    je .no_instruction
+    
+    ; Get instruction details
+    movzx r12d, byte [rbx + pipeline_stage.opcode]
+    movzx r13d, byte [rbx + pipeline_stage.rd]
+    movzx r14d, byte [rbx + pipeline_stage.rs1]
+    movzx r15d, byte [rbx + pipeline_stage.rs2]
+    mov eax, [rbx + pipeline_stage.imm]
+    
+    ; Check if opcode is valid
+    cmp r12d, 0x36
+    ja .illegal_instruction
+    
+    ; Dispatch to instruction handler
+    mov rax, [opcode_table + r12 * 8]
+    call rax
+    
+    ; Store result
+    mov [rbx + pipeline_stage.result], rax
+    
+    ; Check if instruction needs memory access
+    cmp r12d, 0x0F  ; LD
+    jb .no_memory
+    cmp r12d, 0x16  ; SB
+    ja .no_memory
+    
+    ; Mark as needing memory access
+    mov byte [rbx + pipeline_stage.mem_addr], 1
+    
+.no_memory:
+    ; Move to memory stage
+    lea r12, [pipeline_state + pipeline_state.stages + STAGE_MEMORY * pipeline_stage_size]
+    mov al, [rbx + pipeline_stage.opcode]
+    mov [r12 + pipeline_stage.opcode], al
+    mov al, [rbx + pipeline_stage.rd]
+    mov [r12 + pipeline_stage.rd], al
+    mov rax, [rbx + pipeline_stage.result]
+    mov [r12 + pipeline_stage.result], rax
+    mov al, [rbx + pipeline_stage.mem_addr]
+    mov [r12 + pipeline_stage.mem_addr], al
+    mov byte [r12 + pipeline_stage.valid], 1
+    
+    ; Clear execute stage
+    mov byte [rbx + pipeline_stage.valid], 0
+    
+    xor eax, eax
     jmp .done
     
-.no_stall:
-    ; Check for flush
-    cmp byte [flush_flag], 0
-    je .no_flush
-    call pipeline_flush
-    mov byte [flush_flag], 0
-    inc qword [pipeline_flushes]
+.illegal_instruction:
+    mov eax, 1
     
-.no_flush:
-    ; Execute pipeline stages in reverse order
-    call stage_wb
-    call stage_mem
-    call stage_ex
-    call stage_id
-    call stage_if
-    
-    ; Check for hazards
-    call detect_hazards
-    test rax, rax
-    jz .done
-    
-    ; Handle hazard
-    cmp al, HAZ_DATA
-    je .data_hazard
-    cmp al, HAZ_CONTROL
-    je .control_hazard
-    jmp .done
-    
-.data_hazard:
-    ; Insert bubble
-    call insert_bubble
-    jmp .done
-    
-.control_hazard:
-    ; Flush pipeline
-    mov byte [flush_flag], 1
+.no_instruction:
+    xor eax, eax
     
 .done:
     pop r15
@@ -194,715 +384,457 @@ pipeline_step:
     pop rbp
     ret
 
-; Instruction Fetch stage
-stage_if:
+; Memory stage
+; Input: None
+; Output: RAX = 0 on success, error code otherwise
+pipeline_memory:
     push rbp
     mov rbp, rsp
     push rbx
-    push rcx
-    push rdx
+    push r12
+    push r13
     
-    ; Check if stage is stalled
-    cmp byte [if_id + pipeline_reg.valid], 0
-    jne .stalled
+    ; Get memory stage
+    lea rbx, [pipeline_state + pipeline_state.stages + STAGE_MEMORY * pipeline_stage_size]
     
-    ; Get PC from VM state
-    mov rax, [vm_state + 0]  ; VM_PC
+    ; Check if stage is valid
+    cmp byte [rbx + pipeline_stage.valid], 0
+    je .no_instruction
     
-    ; Branch prediction
-    mov rdi, rax
-    call branch_predict
-    mov rbx, rax            ; Save prediction
+    ; Check if memory access is needed
+    cmp byte [rbx + pipeline_stage.mem_addr], 0
+    je .no_memory_access
     
-    ; Fetch instruction
-    mov rdi, [vm_state + 0]
-    call fetch_instruction
-    mov edx, eax            ; Save instruction
+    ; Handle memory access based on opcode
+    movzx r12d, byte [rbx + pipeline_stage.opcode]
     
-    ; Update IF/ID register
-    mov byte [if_id + pipeline_reg.valid], 1
-    mov rax, [vm_state + 0]
-    mov [if_id + pipeline_reg.pc], rax
-    mov [if_id + pipeline_reg.inst], edx
+    ; Load instructions
+    cmp r12d, 0x0F  ; LD
+    je .handle_load
+    cmp r12d, 0x10  ; LW
+    je .handle_load
+    cmp r12d, 0x11  ; LH
+    je .handle_load
+    cmp r12d, 0x12  ; LB
+    je .handle_load
     
-    ; Update PC based on prediction
-    test rbx, rbx
-    jz .no_branch_predict
-    mov [vm_state + 0], rbx  ; Use predicted target
+    ; Store instructions
+    cmp r12d, 0x13  ; ST
+    je .handle_store
+    cmp r12d, 0x14  ; SW
+    je .handle_store
+    cmp r12d, 0x15  ; SH
+    je .handle_store
+    cmp r12d, 0x16  ; SB
+    je .handle_store
+    
+    jmp .no_memory_access
+    
+.handle_load:
+    ; Load from memory
+    mov rdi, [rbx + pipeline_stage.result]  ; Address
+    lea rsi, [rbx + pipeline_stage.mem_data]  ; Buffer
+    mov rdx, 8  ; 64-bit load
+    call memory_read
+    test rax, rax
+    jnz .memory_error
+    
+    jmp .memory_done
+    
+.handle_store:
+    ; Store to memory
+    mov rdi, [rbx + pipeline_stage.result]  ; Address
+    lea rsi, [rbx + pipeline_stage.mem_data]  ; Data
+    mov rdx, 8  ; 64-bit store
+    call memory_write
+    test rax, rax
+    jnz .memory_error
+    
+.memory_done:
+    ; Update performance counter
+    lea r12, [vm_state]
+    inc qword [r12 + VM_PERF + 6 * 8]  ; Memory operations counter
+    
+.no_memory_access:
+    ; Move to writeback stage
+    lea r12, [pipeline_state + pipeline_state.stages + STAGE_WRITEBACK * pipeline_stage_size]
+    mov al, [rbx + pipeline_stage.opcode]
+    mov [r12 + pipeline_stage.opcode], al
+    mov al, [rbx + pipeline_stage.rd]
+    mov [r12 + pipeline_stage.rd], al
+    mov rax, [rbx + pipeline_stage.result]
+    mov [r12 + pipeline_stage.result], rax
+    mov rax, [rbx + pipeline_stage.mem_data]
+    mov [r12 + pipeline_stage.mem_data], rax
+    mov byte [r12 + pipeline_stage.valid], 1
+    
+    ; Clear memory stage
+    mov byte [rbx + pipeline_stage.valid], 0
+    
+    xor eax, eax
     jmp .done
     
-.no_branch_predict:
-    add qword [vm_state + 0], 4  ; Normal increment
+.memory_error:
+    mov eax, -1
+    jmp .done
+    
+.no_instruction:
+    xor eax, eax
     
 .done:
-.stalled:
-    pop rdx
-    pop rcx
+    pop r13
+    pop r12
     pop rbx
     pop rbp
     ret
 
-; Instruction Decode stage
-stage_id:
+; Writeback stage
+; Input: None
+; Output: RAX = 0 on success, error code otherwise
+pipeline_writeback:
     push rbp
     mov rbp, rsp
     push rbx
-    push rcx
-    push rdx
+    push r12
+    push r13
     
-    ; Check if stage has valid data
-    cmp byte [if_id + pipeline_reg.valid], 0
-    je .done
+    ; Get writeback stage
+    lea rbx, [pipeline_state + pipeline_state.stages + STAGE_WRITEBACK * pipeline_stage_size]
     
-    ; Check if next stage is ready
-    cmp byte [id_ex + pipeline_reg.valid], 0
-    jne .stalled
+    ; Check if stage is valid
+    cmp byte [rbx + pipeline_stage.valid], 0
+    je .no_instruction
     
-    ; Decode instruction
-    mov ebx, [if_id + pipeline_reg.inst]
+    ; Get instruction details
+    movzx r12d, byte [rbx + pipeline_stage.opcode]
+    movzx r13d, byte [rbx + pipeline_stage.rd]
+    mov rax, [rbx + pipeline_stage.result]
     
-    ; Extract opcode
-    mov eax, ebx
-    shr eax, 26
-    and al, 0x3F
-    mov [id_ex + pipeline_reg.opcode], al
+    ; Write result to register (if not R0)
+    test r13d, r13d
+    jz .skip_register_write
     
-    ; Extract register fields
-    mov eax, ebx
-    shr eax, 21
-    and al, 0x1F
-    mov [id_ex + pipeline_reg.rd], al
+    ; Check if this was a load instruction
+    cmp r12d, 0x0F  ; LD
+    jb .not_load
+    cmp r12d, 0x12  ; LB
+    ja .not_load
     
-    mov eax, ebx
-    shr eax, 16
-    and al, 0x1F
-    mov [id_ex + pipeline_reg.rs1], al
+    ; Use memory data for loads
+    mov rax, [rbx + pipeline_stage.mem_data]
     
-    mov eax, ebx
-    shr eax, 11
-    and al, 0x1F
-    mov [id_ex + pipeline_reg.rs2], al
+.not_load:
+    ; Write to register
+    lea r12, [vm_state]
+    mov [r12 + VM_GPRS + r13 * 8], rax
     
-    ; Extract immediate
-    movsx rax, bx           ; Sign extend 16-bit immediate
-    mov [id_ex + pipeline_reg.imm], rax
+.skip_register_write:
+    ; Clear writeback stage
+    mov byte [rbx + pipeline_stage.valid], 0
     
-    ; Determine instruction type
-    movzx eax, byte [id_ex + pipeline_reg.opcode]
-    call get_instruction_type
-    mov [id_ex + pipeline_reg.mem_op], al
+    ; Update performance counter
+    lea r12, [vm_state]
+    inc qword [r12 + VM_PERF + 1 * 8]  ; Cycle counter
     
-    ; Copy other fields
-    mov rax, [if_id + pipeline_reg.pc]
-    mov [id_ex + pipeline_reg.pc], rax
-    mov eax, [if_id + pipeline_reg.inst]
-    mov [id_ex + pipeline_reg.inst], eax
+    xor eax, eax
+    jmp .done
     
-    ; Mark stage as valid
-    mov byte [id_ex + pipeline_reg.valid], 1
-    
-    ; Clear previous stage
-    mov byte [if_id + pipeline_reg.valid], 0
+.no_instruction:
+    xor eax, eax
     
 .done:
-.stalled:
-    pop rdx
-    pop rcx
+    pop r13
+    pop r12
     pop rbx
     pop rbp
     ret
 
-; Execute stage
-stage_ex:
+; Single pipeline step
+; Input: None
+; Output: RAX = 0 on success, error code otherwise
+pipeline_step:
     push rbp
     mov rbp, rsp
-    push rbx
-    push rcx
-    push rdx
-    push rsi
-    push rdi
     
-    ; Check if stage has valid data
-    cmp byte [id_ex + pipeline_reg.valid], 0
-    je .done
-    
-    ; Check if next stage is ready
-    cmp byte [ex_mem + pipeline_reg.valid], 0
-    jne .stalled
-    
-    ; Get operands with forwarding
-    movzx ecx, byte [id_ex + pipeline_reg.rs1]
-    test ecx, ecx
-    jz .rs1_zero
-    mov rdi, rcx
-    call get_forwarded_value
-    mov rsi, rax
-    jmp .get_rs2
-    
-.rs1_zero:
-    xor esi, esi
-    
-.get_rs2:
-    movzx ecx, byte [id_ex + pipeline_reg.rs2]
-    test ecx, ecx
-    jz .rs2_zero
-    mov rdi, rcx
-    call get_forwarded_value
-    mov rdi, rax
-    jmp .execute_alu
-    
-.rs2_zero:
-    xor edi, edi
-    
-.execute_alu:
-    ; Execute based on opcode
-    movzx eax, byte [id_ex + pipeline_reg.opcode]
-    cmp al, 0x00            ; ADD
-    je .alu_add
-    cmp al, 0x01            ; SUB
-    je .alu_sub
-    cmp al, 0x02            ; MUL
-    je .alu_mul
-    cmp al, 0x06            ; AND
-    je .alu_and
-    cmp al, 0x07            ; OR
-    je .alu_or
-    cmp al, 0x08            ; XOR
-    je .alu_xor
-    cmp al, 0x0F            ; LD
-    je .alu_add_imm
-    cmp al, 0x13            ; ST
-    je .alu_add_imm
-    
-    ; Default: pass through rs1
-    mov rax, rsi
-    jmp .store_result
-    
-.alu_add:
-    lea rax, [rsi + rdi]
-    jmp .store_result
-    
-.alu_sub:
-    mov rax, rsi
-    sub rax, rdi
-    jmp .store_result
-    
-.alu_mul:
-    mov rax, rsi
-    imul rax, rdi
-    jmp .store_result
-    
-.alu_and:
-    mov rax, rsi
-    and rax, rdi
-    jmp .store_result
-    
-.alu_or:
-    mov rax, rsi
-    or rax, rdi
-    jmp .store_result
-    
-.alu_xor:
-    mov rax, rsi
-    xor rax, rdi
-    jmp .store_result
-    
-.alu_add_imm:
-    mov rax, rsi
-    add rax, [id_ex + pipeline_reg.imm]
-    
-.store_result:
-    mov [ex_mem + pipeline_reg.alu_out], rax
-    
-    ; Handle branches
-    movzx eax, byte [id_ex + pipeline_reg.opcode]
-    cmp al, 0x17            ; BEQ
-    jl .not_branch
-    cmp al, 0x1C            ; BGEU
-    jg .not_branch
-    
-    ; Evaluate branch condition
-    call evaluate_branch
-    mov [ex_mem + pipeline_reg.branch], al
-    
-    ; Check prediction
-    mov rdi, [id_ex + pipeline_reg.pc]
-    movzx esi, al
-    call check_branch_prediction
+    ; Execute pipeline stages in reverse order (writeback to fetch)
+    call pipeline_writeback
     test rax, rax
-    jz .not_branch
+    jnz .error
     
-    ; Misprediction - flush pipeline
-    mov byte [flush_flag], 1
-    inc qword [branch_mispredicts]
+    call pipeline_memory
+    test rax, rax
+    jnz .error
     
-.not_branch:
-    ; Copy fields to next stage
-    mov rax, [id_ex + pipeline_reg.pc]
-    mov [ex_mem + pipeline_reg.pc], rax
-    mov eax, [id_ex + pipeline_reg.inst]
-    mov [ex_mem + pipeline_reg.inst], eax
-    movzx eax, byte [id_ex + pipeline_reg.rd]
-    mov [ex_mem + pipeline_reg.rd], al
-    movzx eax, byte [id_ex + pipeline_reg.mem_op]
-    mov [ex_mem + pipeline_reg.mem_op], al
+    call pipeline_execute
+    test rax, rax
+    jnz .error
     
-    ; For stores, save rs2 value
-    cmp al, MEM_STORE
-    jne .not_store
-    mov [ex_mem + pipeline_reg.mem_data], rdi
+    call pipeline_decode
+    test rax, rax
+    jnz .error
     
-.not_store:
-    ; Mark stage as valid
-    mov byte [ex_mem + pipeline_reg.valid], 1
+    call pipeline_fetch
+    test rax, rax
+    jnz .error
     
-    ; Clear previous stage
-    mov byte [id_ex + pipeline_reg.valid], 0
+    xor eax, eax
+    jmp .done
+    
+.error:
+    ; Error occurred
     
 .done:
-.stalled:
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rbx
     pop rbp
     ret
 
-; Memory stage
-stage_mem:
+; Check for data hazards
+; Input: RBX = decode stage pointer
+; Output: RAX = 0 if no hazard, 1 if hazard detected
+check_data_hazards:
     push rbp
     mov rbp, rsp
     push rbx
-    push rcx
-    push rdx
+    push r12
+    push r13
+    push r14
     
-    ; Check if stage has valid data
-    cmp byte [ex_mem + pipeline_reg.valid], 0
-    je .done
+    ; Get source registers
+    movzx r12d, byte [rbx + pipeline_stage.rs1]
+    movzx r13d, byte [rbx + pipeline_stage.rs2]
+    movzx r14d, byte [rbx + pipeline_stage.rd]
     
-    ; Check if next stage is ready
-    cmp byte [mem_wb + pipeline_reg.valid], 0
-    jne .stalled
+    ; Check execute stage
+    lea r12, [pipeline_state + pipeline_state.stages + STAGE_EXECUTE * pipeline_stage_size]
+    cmp byte [r12 + pipeline_stage.valid], 0
+    je .check_memory
     
-    ; Check memory operation type
-    movzx eax, byte [ex_mem + pipeline_reg.mem_op]
-    cmp al, MEM_LOAD
-    je .do_load
-    cmp al, MEM_STORE
-    je .do_store
+    movzx eax, byte [r12 + pipeline_stage.rd]
+    cmp eax, r12d
+    je .hazard_detected
+    cmp eax, r13d
+    je .hazard_detected
     
-    ; No memory operation - pass through ALU result
-    mov rax, [ex_mem + pipeline_reg.alu_out]
-    mov [mem_wb + pipeline_reg.mem_data], rax
-    jmp .copy_fields
+    ; Check memory stage
+.check_memory:
+    lea r12, [pipeline_state + pipeline_state.stages + STAGE_MEMORY * pipeline_stage_size]
+    cmp byte [r12 + pipeline_stage.valid], 0
+    je .check_writeback
     
-.do_load:
-    ; Load from memory
-    mov rdi, [ex_mem + pipeline_reg.alu_out]
-    call memory_read
-    mov [mem_wb + pipeline_reg.mem_data], rax
-    jmp .copy_fields
+    movzx eax, byte [r12 + pipeline_stage.rd]
+    cmp eax, r12d
+    je .hazard_detected
+    cmp eax, r13d
+    je .hazard_detected
     
-.do_store:
-    ; Store to memory
-    mov rdi, [ex_mem + pipeline_reg.alu_out]
-    mov rsi, [ex_mem + pipeline_reg.mem_data]
-    call memory_write
-    ; Pass through for forwarding
-    mov rax, [ex_mem + pipeline_reg.mem_data]
-    mov [mem_wb + pipeline_reg.mem_data], rax
-    
-.copy_fields:
-    ; Copy fields to next stage
-    mov rax, [ex_mem + pipeline_reg.pc]
-    mov [mem_wb + pipeline_reg.pc], rax
-    mov eax, [ex_mem + pipeline_reg.inst]
-    mov [mem_wb + pipeline_reg.inst], eax
-    movzx eax, byte [ex_mem + pipeline_reg.rd]
-    mov [mem_wb + pipeline_reg.rd], al
-    mov rax, [ex_mem + pipeline_reg.alu_out]
-    mov [mem_wb + pipeline_reg.alu_out], rax
-    
-    ; Mark stage as valid
-    mov byte [mem_wb + pipeline_reg.valid], 1
-    
-    ; Clear previous stage
-    mov byte [ex_mem + pipeline_reg.valid], 0
-    
-.done:
-.stalled:
-    pop rdx
-    pop rcx
-    pop rbx
-    pop rbp
-    ret
-
-; Write Back stage
-stage_wb:
-    push rbp
-    mov rbp, rsp
-    push rbx
-    push rcx
-    
-    ; Check if stage has valid data
-    cmp byte [mem_wb + pipeline_reg.valid], 0
-    je .done
-    
-    ; Get destination register
-    movzx ecx, byte [mem_wb + pipeline_reg.rd]
-    test ecx, ecx
-    jz .no_writeback        ; R0 is always zero
-    
-    ; Write result to register file
-    mov rax, [mem_wb + pipeline_reg.mem_data]
-    mov [vm_state + 24 + rcx * 8], rax  ; VM_GPRS offset
-    
-.no_writeback:
-    ; Clear stage
-    mov byte [mem_wb + pipeline_reg.valid], 0
-    
-.done:
-    pop rcx
-    pop rbx
-    pop rbp
-    ret
-
-; Detect pipeline hazards
-; Output: RAX = hazard type
-detect_hazards:
-    push rbx
-    push rcx
-    push rdx
-    
-    ; Check for data hazards (RAW)
-    cmp byte [id_ex + pipeline_reg.valid], 0
+    ; Check writeback stage
+.check_writeback:
+    lea r12, [pipeline_state + pipeline_state.stages + STAGE_WRITEBACK * pipeline_stage_size]
+    cmp byte [r12 + pipeline_stage.valid], 0
     je .no_hazard
     
-    ; Get source registers from ID stage
-    movzx ebx, byte [id_ex + pipeline_reg.rs1]
-    movzx ecx, byte [id_ex + pipeline_reg.rs2]
-    
-    ; Check against EX stage destination
-    cmp byte [ex_mem + pipeline_reg.valid], 0
-    je .check_mem
-    
-    movzx edx, byte [ex_mem + pipeline_reg.rd]
-    test edx, edx
-    jz .check_mem
-    
-    cmp ebx, edx
-    je .data_hazard
-    cmp ecx, edx
-    je .data_hazard
-    
-.check_mem:
-    ; Check against MEM stage destination
-    cmp byte [mem_wb + pipeline_reg.valid], 0
-    je .no_hazard
-    
-    movzx edx, byte [mem_wb + pipeline_reg.rd]
-    test edx, edx
-    jz .no_hazard
-    
-    cmp ebx, edx
-    je .check_forwarding
-    cmp ecx, edx
-    je .check_forwarding
-    jmp .no_hazard
-    
-.check_forwarding:
-    ; Check if forwarding can resolve it
-    cmp byte [forwarding_enabled], 0
-    je .data_hazard
-    
-    ; Check if it's a load-use hazard
-    movzx eax, byte [ex_mem + pipeline_reg.mem_op]
-    cmp al, MEM_LOAD
-    je .data_hazard
+    movzx eax, byte [r12 + pipeline_stage.rd]
+    cmp eax, r12d
+    je .hazard_detected
+    cmp eax, r13d
+    je .hazard_detected
     
 .no_hazard:
     xor eax, eax
     jmp .done
     
-.data_hazard:
-    mov al, HAZ_DATA
+.hazard_detected:
+    mov eax, 1
     
 .done:
-    pop rdx
-    pop rcx
+    pop r14
+    pop r13
+    pop r12
     pop rbx
-    ret
-
-; Get forwarded value for register
-; Input: RDI = register number
-; Output: RAX = value
-get_forwarded_value:
-    push rbx
-    push rcx
-    
-    ; Check if forwarding is enabled
-    cmp byte [forwarding_enabled], 0
-    je .no_forward
-    
-    ; Check EX/MEM stage
-    cmp byte [ex_mem + pipeline_reg.valid], 0
-    je .check_mem_wb
-    
-    movzx ecx, byte [ex_mem + pipeline_reg.rd]
-    cmp ecx, edi
-    jne .check_mem_wb
-    
-    ; Forward from EX/MEM
-    mov rax, [ex_mem + pipeline_reg.alu_out]
-    jmp .done
-    
-.check_mem_wb:
-    ; Check MEM/WB stage
-    cmp byte [mem_wb + pipeline_reg.valid], 0
-    je .no_forward
-    
-    movzx ecx, byte [mem_wb + pipeline_reg.rd]
-    cmp ecx, edi
-    jne .no_forward
-    
-    ; Forward from MEM/WB
-    mov rax, [mem_wb + pipeline_reg.mem_data]
-    jmp .done
-    
-.no_forward:
-    ; Read from register file
-    mov rax, [vm_state + 24 + rdi * 8]  ; VM_GPRS offset
-    
-.done:
-    pop rcx
-    pop rbx
-    ret
-
-; Insert pipeline bubble
-insert_bubble:
-    ; Invalidate ID/EX stage
-    mov byte [id_ex + pipeline_reg.valid], 0
-    
-    ; Stall IF/ID stage
-    ; (keeping its valid bit set prevents IF from overwriting)
-    
-    ret
-
-; Flush pipeline
-pipeline_flush:
-    push rdi
-    push rcx
-    
-    ; Clear all pipeline registers except WB
-    lea rdi, [if_id]
-    xor eax, eax
-    mov ecx, pipeline_reg_size * 3 / 8
-    rep stosq
-    
-    pop rcx
-    pop rdi
-    ret
-
-; Stall pipeline for N cycles
-; Input: RDI = number of cycles
-pipeline_stall:
-    mov [stall_cycles], rdi
-    ret
-
-; Get instruction type
-; Input: AL = opcode
-; Output: AL = memory operation type
-get_instruction_type:
-    cmp al, 0x0F            ; LD
-    jl .not_mem
-    cmp al, 0x12            ; LB
-    jle .is_load
-    cmp al, 0x13            ; ST
-    jl .not_mem
-    cmp al, 0x16            ; SB
-    jle .is_store
-    
-.not_mem:
-    mov al, MEM_NONE
-    ret
-    
-.is_load:
-    mov al, MEM_LOAD
-    ret
-    
-.is_store:
-    mov al, MEM_STORE
-    ret
-
-; Evaluate branch condition
-; Input: RSI = rs1 value, RDI = rs2 value, opcode in id_ex
-; Output: AL = 1 if branch taken, 0 otherwise
-evaluate_branch:
-    push rbx
-    
-    movzx ebx, byte [id_ex + pipeline_reg.opcode]
-    
-    cmp bl, 0x17            ; BEQ
-    je .beq
-    cmp bl, 0x18            ; BNE
-    je .bne
-    cmp bl, 0x19            ; BLT
-    je .blt
-    cmp bl, 0x1A            ; BGE
-    je .bge
-    cmp bl, 0x1B            ; BLTU
-    je .bltu
-    cmp bl, 0x1C            ; BGEU
-    je .bgeu
-    
-    ; Not a branch
-    xor al, al
-    jmp .done
-    
-.beq:
-    cmp rsi, rdi
-    sete al
-    jmp .done
-    
-.bne:
-    cmp rsi, rdi
-    setne al
-    jmp .done
-    
-.blt:
-    cmp rsi, rdi
-    setl al
-    jmp .done
-    
-.bge:
-    cmp rsi, rdi
-    setge al
-    jmp .done
-    
-.bltu:
-    cmp rsi, rdi
-    setb al
-    jmp .done
-    
-.bgeu:
-    cmp rsi, rdi
-    setae al
-    
-.done:
-    pop rbx
+    pop rbp
     ret
 
 ; Branch prediction
-; Input: RDI = PC
-; Output: RAX = predicted target (0 if not taken)
+; Input: RDI = PC, RSI = target PC
+; Output: RAX = predicted target
 branch_predict:
+    push rbp
+    mov rbp, rsp
     push rbx
-    push rcx
-    push rdx
     
-    inc qword [branch_predictions]
-    
-    ; Hash PC for predictor index
+    ; Calculate branch predictor index
     mov rax, rdi
-    xor rax, [global_history]
-    and rax, (BRANCH_PRED_SIZE - 1)
+    shr rax, 2  ; Align to instruction boundary
+    and rax, 0x3FF  ; 1024 entries
     
-    ; Check 2-bit counter
-    movzx ecx, byte [branch_history + rax]
-    cmp cl, 2               ; Weakly/strongly taken threshold
-    jb .not_taken
+    ; Get predictor entry
+    lea rbx, [pipeline_state + pipeline_state.branch_predictor]
+    mov rax, [rbx + rax * 8]
     
-    ; Check BTB for target
-    mov rax, rdi
-    and rax, (BTB_SIZE - 1)
-    mov rbx, [btb_tags + rax * 8]
-    cmp rbx, rdi
-    jne .not_taken
+    ; Check if taken (bit 1 set)
+    test rax, 2
+    jz .not_taken
     
-    ; Return predicted target
-    mov rax, [btb_targets + rax * 8]
+    ; Predict taken
+    mov rax, rsi
     jmp .done
     
 .not_taken:
-    xor eax, eax
+    ; Predict not taken (sequential)
+    mov rax, rdi
+    add rax, 4
     
 .done:
-    pop rdx
-    pop rcx
     pop rbx
+    pop rbp
     ret
 
 ; Update branch predictor
-; Input: RDI = PC, RSI = actual taken (0/1), RDX = target
+; Input: RDI = PC, RSI = actual target, RDX = taken (1) or not taken (0)
 branch_update:
+    push rbp
+    mov rbp, rsp
     push rbx
-    push rcx
+    push r12
     
-    ; Update global history
-    shl byte [global_history], 1
-    or [global_history], sil
-    
-    ; Hash PC for predictor index
+    ; Calculate branch predictor index
     mov rax, rdi
-    xor rax, [global_history]
-    and rax, (BRANCH_PRED_SIZE - 1)
+    shr rax, 2
+    and rax, 0x3FF
     
-    ; Update 2-bit counter
-    movzx ecx, byte [branch_history + rax]
-    test sil, sil
-    jz .not_taken
+    ; Get predictor entry
+    lea rbx, [pipeline_state + pipeline_state.branch_predictor]
+    mov r12, [rbx + rax * 8]
     
-    ; Branch taken - increment counter (saturating)
-    cmp cl, 3
-    je .update_btb
-    inc cl
-    jmp .store_counter
+    ; Update 2-bit saturating counter
+    test rdx, rdx
+    jz .not_taken_update
     
-.not_taken:
-    ; Branch not taken - decrement counter (saturating)
-    test cl, cl
-    jz .done
-    dec cl
+    ; Taken: increment counter
+    cmp r12, 3
+    je .max_taken
+    inc r12
+    jmp .store_update
     
-.store_counter:
-    mov [branch_history + rax], cl
+.max_taken:
+    ; Already at maximum
+    jmp .store_update
     
-.update_btb:
-    ; Update BTB if taken
-    test sil, sil
-    jz .done
+.not_taken_update:
+    ; Not taken: decrement counter
+    test r12, r12
+    jz .min_not_taken
+    dec r12
     
-    mov rax, rdi
-    and rax, (BTB_SIZE - 1)
-    mov [btb_tags + rax * 8], rdi
-    mov [btb_targets + rax * 8], rdx
+.min_not_taken:
+    ; Already at minimum
     
-.done:
-    pop rcx
+.store_update:
+    ; Store updated counter
+    mov [rbx + rax * 8], r12
+    
+    pop r12
     pop rbx
+    pop rbp
     ret
 
-; Check branch prediction
-; Input: RDI = PC, RSI = actual taken
-; Output: RAX = 1 if mispredicted, 0 if correct
-check_branch_prediction:
+; Flush pipeline
+; Input: RDI = new PC
+pipeline_flush:
+    push rbp
+    mov rbp, rsp
     push rbx
-    push rcx
     
-    ; Get prediction
-    push rsi
-    call branch_predict
-    pop rsi
+    ; Clear all pipeline stages
+    lea rbx, [pipeline_state + pipeline_state.stages]
+    mov ecx, 5
     
-    ; Check if prediction matches actual
-    test rax, rax
-    setz cl             ; CL = 1 if predicted not taken
-    test sil, sil
-    setz ch             ; CH = 1 if actual not taken
-    xor cl, ch
-    movzx eax, cl
+.clear_loop:
+    mov byte [rbx + pipeline_stage.valid], 0
+    mov byte [rbx + pipeline_stage.stall], 0
+    mov byte [rbx + pipeline_stage.flush], 0
+    add rbx, pipeline_stage_size
+    loop .clear_loop
     
-    pop rcx
+    ; Update PC
+    lea rbx, [vm_state]
+    mov [rbx + VM_PC], rdi
+    
     pop rbx
+    pop rbp
     ret
+
+; Stall pipeline
+; Input: RDI = stage to stall (0-4)
+pipeline_stall:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    
+    ; Set stall bit for specified stage
+    lea rbx, [pipeline_state + pipeline_state.stages]
+    mov rax, rdi
+    imul rax, pipeline_stage_size
+    add rbx, rax
+    mov byte [rbx + pipeline_stage.stall], 1
+    
+    pop rbx
+    pop rbp
+    ret
+
+; Instruction execution stubs (these would be implemented in vm.asm)
+execute_add: ret
+execute_sub: ret
+execute_mul: ret
+execute_mulh: ret
+execute_div: ret
+execute_mod: ret
+execute_and: ret
+execute_or: ret
+execute_xor: ret
+execute_not: ret
+execute_shl: ret
+execute_shr: ret
+execute_sar: ret
+execute_rol: ret
+execute_ror: ret
+execute_ld: ret
+execute_lw: ret
+execute_lh: ret
+execute_lb: ret
+execute_st: ret
+execute_sw: ret
+execute_sh: ret
+execute_sb: ret
+execute_beq: ret
+execute_bne: ret
+execute_blt: ret
+execute_bge: ret
+execute_bltu: ret
+execute_bgeu: ret
+execute_jmp: ret
+execute_call: ret
+execute_ret: ret
+execute_syscall: ret
+execute_halt: ret
+execute_nop: ret
+execute_cpuid: ret
+execute_rdcycle: ret
+execute_rdperf: ret
+execute_prefetch: ret
+execute_clflush: ret
+execute_fence: ret
+execute_lr: ret
+execute_sc: ret
+execute_amoswap: ret
+execute_amoadd: ret
+execute_amoand: ret
+execute_amoor: ret
+execute_amoxor: ret
+execute_vadd_f64: ret
+execute_vsub_f64: ret
+execute_vmul_f64: ret
+execute_vfma_f64: ret
+execute_vload: ret
+execute_vstore: ret
+execute_vbroadcast: ret
+execute_illegal: ret

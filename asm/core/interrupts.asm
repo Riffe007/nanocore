@@ -1,624 +1,801 @@
-; NanoCore Interrupt and Exception Handling
-; Implements interrupt controller, exception handling, and trap mechanisms
-;
-; Features:
-; - 256 interrupt vectors
-; - Nested interrupt support
-; - Fast interrupt handling
-; - Exception types: page fault, divide by zero, illegal instruction, etc.
-; - Software interrupts (traps)
-; - Interrupt priority levels
+; NanoCore Interrupts Module
+; Handles hardware interrupts, exceptions, and system calls
 
 BITS 64
 SECTION .text
 
+; External symbols
+extern vm_state
+extern memory_read
+extern memory_write
+
 ; Constants
-%define MAX_INTERRUPTS 256
-%define MAX_PRIORITY 15
-%define IRQ_BASE 32         ; Hardware interrupts start at vector 32
+%define VM_PC 0
+%define VM_FLAGS 16
+%define VM_GPRS 24
+%define VM_VREGS (VM_GPRS + 32 * 8)
+%define VM_PERF (VM_VREGS + 16 * 32)
 
-; Exception vectors
-%define EXC_DIVIDE_ERROR 0
-%define EXC_DEBUG 1
-%define EXC_NMI 2
-%define EXC_BREAKPOINT 3
-%define EXC_OVERFLOW 4
-%define EXC_BOUND_RANGE 5
-%define EXC_INVALID_OPCODE 6
-%define EXC_DEVICE_NOT_AVAIL 7
-%define EXC_DOUBLE_FAULT 8
-%define EXC_INVALID_TSS 10
-%define EXC_SEGMENT_NOT_PRESENT 11
-%define EXC_STACK_SEGMENT 12
-%define EXC_GENERAL_PROTECTION 13
-%define EXC_PAGE_FAULT 14
-%define EXC_FPU_ERROR 16
-%define EXC_ALIGNMENT_CHECK 17
-%define EXC_MACHINE_CHECK 18
-%define EXC_SIMD_ERROR 19
+; Interrupt types
+%define INT_SYSCALL 0x80
+%define INT_BREAKPOINT 0x03
+%define INT_PAGE_FAULT 0x0E
+%define INT_DIVIDE_ERROR 0x00
+%define INT_OVERFLOW 0x04
+%define INT_INVALID_OPCODE 0x06
+%define INT_DOUBLE_FAULT 0x08
+%define INT_TIMER 0x20
+%define INT_KEYBOARD 0x21
+%define INT_SERIAL 0x24
 
-; Interrupt flags
-%define INT_FLAG_PENDING 0x01
-%define INT_FLAG_MASKED 0x02
-%define INT_FLAG_EDGE 0x04
-%define INT_FLAG_LEVEL 0x08
-%define INT_FLAG_AUTO_EOI 0x10
+; Exception error codes
+%define ERR_NONE 0
+%define ERR_PRESENT 1
+%define ERR_WRITE 2
+%define ERR_USER 4
+%define ERR_RESERVED 8
+%define ERR_FETCH 16
+
+; Interrupt descriptor table entry
+struc idt_entry
+    .offset_low: resw 1     ; Offset bits 0-15
+    .selector: resw 1       ; Code segment selector
+    .ist: resb 1            ; Interrupt stack table offset
+    .flags: resb 1          ; Type and attributes
+    .offset_mid: resw 1     ; Offset bits 16-31
+    .offset_high: resd 1    ; Offset bits 32-63
+    .reserved: resd 1       ; Reserved
+endstruc
+
+; Interrupt frame (saved registers)
+struc interrupt_frame
+    .rax: resq 1
+    .rcx: resq 1
+    .rdx: resq 1
+    .rbx: resq 1
+    .rsp: resq 1
+    .rbp: resq 1
+    .rsi: resq 1
+    .rdi: resq 1
+    .r8: resq 1
+    .r9: resq 1
+    .r10: resq 1
+    .r11: resq 1
+    .r12: resq 1
+    .r13: resq 1
+    .r14: resq 1
+    .r15: resq 1
+    .rip: resq 1
+    .rflags: resq 1
+    .cs: resw 1
+    .ss: resw 1
+    .error_code: resq 1
+    .padding: resq 1
+endstruc
+
+; Interrupt state
+struc interrupt_state
+    .idt: resb idt_entry_size * 256  ; Interrupt descriptor table
+    .handlers: resq 256              ; Interrupt handler pointers
+    .enabled: resb 1                 ; Interrupts enabled flag
+    .nested: resb 1                  ; Nested interrupt counter
+    .reserved: resb 6                ; Alignment
+    .stats: resq 256                 ; Interrupt statistics
+endstruc
 
 ; Global symbols
 global interrupt_init
 global interrupt_enable
 global interrupt_disable
-global interrupt_register
-global interrupt_unregister
-global interrupt_mask
-global interrupt_unmask
-global interrupt_eoi
-global raise_interrupt
-global raise_exception
-global check_interrupts
-global get_pending_interrupt
-global set_interrupt_priority
-global interrupt_handler
-
-; External symbols
-extern vm_state
-extern pipeline_flush
-extern memory_read
-extern memory_write
+global interrupt_register_handler
+global interrupt_trigger
+global interrupt_dispatch
+global exception_handler
+global syscall_handler
 
 SECTION .bss
 align 64
-; Interrupt vector table
-ivt: resq MAX_INTERRUPTS            ; Handler addresses
+interrupt_state: resb interrupt_state_size
+interrupt_stack: resb 16384  ; 16KB interrupt stack
 
-; Interrupt controller state
-int_pending: resb MAX_INTERRUPTS    ; Pending interrupts bitmap
-int_masked: resb MAX_INTERRUPTS     ; Masked interrupts bitmap
-int_priority: resb MAX_INTERRUPTS   ; Interrupt priorities
-int_flags: resb MAX_INTERRUPTS      ; Interrupt flags
-int_in_service: resb MAX_PRIORITY + 1  ; ISR stack
-
-; Interrupt statistics
-int_count: resq MAX_INTERRUPTS      ; Interrupt counters
-int_cycles: resq 1                  ; Total interrupt cycles
-int_nested: resq 1                  ; Nested interrupt count
-
-; CPU interrupt state
-int_enabled: resb 1                 ; Global interrupt enable
-int_nesting_level: resb 1           ; Current nesting level
-saved_context: resq 32              ; Saved register context
+SECTION .data
+align 64
+; Default interrupt handlers
+default_handlers:
+    dq divide_error_handler      ; 0x00
+    dq debug_handler             ; 0x01
+    dq nmi_handler              ; 0x02
+    dq breakpoint_handler        ; 0x03
+    dq overflow_handler          ; 0x04
+    dq bound_range_handler       ; 0x05
+    dq invalid_opcode_handler    ; 0x06
+    dq device_not_available_handler ; 0x07
+    dq double_fault_handler      ; 0x08
+    dq coprocessor_segment_handler ; 0x09
+    dq invalid_tss_handler       ; 0x0A
+    dq segment_not_present_handler ; 0x0B
+    dq stack_segment_fault_handler ; 0x0C
+    dq general_protection_handler ; 0x0D
+    dq page_fault_handler        ; 0x0E
+    dq reserved_handler          ; 0x0F
+    dq fpu_error_handler         ; 0x10
+    dq alignment_check_handler   ; 0x11
+    dq machine_check_handler     ; 0x12
+    dq simd_exception_handler    ; 0x13
+    dq virtualization_exception_handler ; 0x14
+    times 235 dq reserved_handler ; 0x15-0xFF
+    dq syscall_handler           ; 0x80
 
 SECTION .text
 
 ; Initialize interrupt subsystem
+global interrupt_init
 interrupt_init:
     push rbp
     mov rbp, rsp
-    push rdi
-    push rcx
-    
-    ; Clear interrupt vector table
-    lea rdi, [ivt]
-    lea rax, [default_handler]
-    mov ecx, MAX_INTERRUPTS
-.init_ivt:
-    stosq
-    loop .init_ivt
-    
-    ; Initialize exception handlers
-    lea rax, [exc_divide_error]
-    mov [ivt + EXC_DIVIDE_ERROR * 8], rax
-    lea rax, [exc_page_fault]
-    mov [ivt + EXC_PAGE_FAULT * 8], rax
-    lea rax, [exc_general_protection]
-    mov [ivt + EXC_GENERAL_PROTECTION * 8], rax
-    lea rax, [exc_invalid_opcode]
-    mov [ivt + EXC_INVALID_OPCODE * 8], rax
+    push rbx
+    push r12
+    push r13
     
     ; Clear interrupt state
-    lea rdi, [int_pending]
+    lea rdi, [interrupt_state]
     xor eax, eax
-    mov ecx, MAX_INTERRUPTS * 4 / 8
+    mov ecx, interrupt_state_size / 8
     rep stosq
     
-    ; Set default priorities
-    lea rdi, [int_priority]
-    mov ecx, 32
-    mov al, 15              ; Exceptions have highest priority
-    rep stosb
-    mov ecx, MAX_INTERRUPTS - 32
-    mov al, 7               ; Default priority for IRQs
-    rep stosb
+    ; Initialize IDT entries
+    lea rbx, [interrupt_state + interrupt_state.idt]
+    lea r12, [default_handlers]
+    mov r13, 0  ; Interrupt number
     
-    ; Clear statistics
-    lea rdi, [int_count]
-    xor eax, eax
-    mov ecx, MAX_INTERRUPTS + 2
-    rep stosq
+.init_idt:
+    cmp r13, 256
+    jae .setup_idt
+    
+    ; Get handler address
+    mov rax, [r12 + r13 * 8]
+    
+    ; Set up IDT entry
+    mov [rbx + idt_entry.offset_low], ax
+    shr rax, 16
+    mov [rbx + idt_entry.offset_mid], ax
+    shr rax, 16
+    mov [rbx + idt_entry.offset_high], eax
+    
+    ; Set selector (kernel code segment)
+    mov word [rbx + idt_entry.selector], 0x08
+    
+    ; Set flags (interrupt gate, present, ring 0)
+    mov byte [rbx + idt_entry.flags], 0x8E
+    
+    ; Set IST (interrupt stack table)
+    mov byte [rbx + idt_entry.ist], 0
+    
+    ; Store handler pointer
+    lea rdi, [interrupt_state + interrupt_state.handlers]
+    mov [rdi + r13 * 8], rax
+    
+    ; Next entry
+    add rbx, idt_entry_size
+    inc r13
+    jmp .init_idt
+    
+.setup_idt:
+    ; Load IDT
+    lea rdi, [interrupt_state + interrupt_state.idt]
+    mov rsi, 256 * idt_entry_size - 1
+    lidt [rdi]
     
     ; Enable interrupts
-    mov byte [int_enabled], 1
-    mov byte [int_nesting_level], 0
+    mov byte [interrupt_state + interrupt_state.enabled], 1
     
-    pop rcx
-    pop rdi
+    ; Clear statistics
+    lea rdi, [interrupt_state + interrupt_state.stats]
+    xor eax, eax
+    mov ecx, 256
+    rep stosq
+    
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
     pop rbp
     ret
 
-; Enable interrupts globally
+; Enable interrupts
+global interrupt_enable
 interrupt_enable:
-    mov byte [int_enabled], 1
-    or byte [vm_state + 16], (1 << 4)  ; Set IE flag in VM
+    push rbp
+    mov rbp, rsp
+    
+    ; Set enabled flag
+    mov byte [interrupt_state + interrupt_state.enabled], 1
+    
+    ; Enable hardware interrupts
+    sti
+    
+    pop rbp
     ret
 
-; Disable interrupts globally
+; Disable interrupts
+global interrupt_disable
 interrupt_disable:
-    mov byte [int_enabled], 0
-    and byte [vm_state + 16], ~(1 << 4)  ; Clear IE flag
+    push rbp
+    mov rbp, rsp
+    
+    ; Disable hardware interrupts
+    cli
+    
+    ; Clear enabled flag
+    mov byte [interrupt_state + interrupt_state.enabled], 0
+    
+    pop rbp
     ret
 
 ; Register interrupt handler
-; Input: RDI = vector, RSI = handler address
-interrupt_register:
-    cmp rdi, MAX_INTERRUPTS
-    jae .error
-    
-    mov [ivt + rdi * 8], rsi
-    xor eax, eax
-    ret
-    
-.error:
-    mov rax, -1
-    ret
-
-; Unregister interrupt handler
-; Input: RDI = vector
-interrupt_unregister:
-    cmp rdi, MAX_INTERRUPTS
-    jae .error
-    
-    lea rax, [default_handler]
-    mov [ivt + rdi * 8], rax
-    xor eax, eax
-    ret
-    
-.error:
-    mov rax, -1
-    ret
-
-; Mask interrupt
-; Input: RDI = vector
-interrupt_mask:
-    cmp rdi, MAX_INTERRUPTS
-    jae .done
-    
-    or byte [int_masked + rdi], 1
-    or byte [int_flags + rdi], INT_FLAG_MASKED
-    
-.done:
-    ret
-
-; Unmask interrupt
-; Input: RDI = vector
-interrupt_unmask:
-    cmp rdi, MAX_INTERRUPTS
-    jae .done
-    
-    and byte [int_masked + rdi], 0
-    and byte [int_flags + rdi], ~INT_FLAG_MASKED
-    
-.done:
-    ret
-
-; End of interrupt
-; Input: RDI = vector
-interrupt_eoi:
-    push rbx
-    
-    ; Get priority
-    movzx ebx, byte [int_priority + rdi]
-    
-    ; Clear in-service bit
-    and byte [int_in_service + rbx], 0
-    
-    ; Clear pending if level-triggered
-    test byte [int_flags + rdi], INT_FLAG_LEVEL
-    jz .done
-    and byte [int_pending + rdi], 0
-    
-.done:
-    pop rbx
-    ret
-
-; Raise interrupt
-; Input: RDI = vector
-raise_interrupt:
-    cmp rdi, MAX_INTERRUPTS
-    jae .done
-    
-    ; Set pending bit
-    or byte [int_pending + rdi], 1
-    or byte [int_flags + rdi], INT_FLAG_PENDING
-    
-    ; Increment counter
-    inc qword [int_count + rdi * 8]
-    
-.done:
-    ret
-
-; Raise exception
-; Input: RDI = exception vector, RSI = error code
-raise_exception:
+; Input: RDI = interrupt number, RSI = handler function
+global interrupt_register_handler
+interrupt_register_handler:
     push rbp
     mov rbp, rsp
     push rbx
-    push rcx
     
-    ; Save error code
-    push rsi
+    ; Check interrupt number range
+    cmp rdi, 256
+    jae .error
     
-    ; Exceptions bypass normal interrupt logic
-    cmp byte [int_nesting_level], 15
-    jae .double_fault
+    ; Store handler
+    lea rbx, [interrupt_state + interrupt_state.handlers]
+    mov [rbx + rdi * 8], rsi
     
-    ; Save context
-    call save_context
+    ; Update IDT entry
+    lea rbx, [interrupt_state + interrupt_state.idt]
+    mov rax, rdi
+    imul rax, idt_entry_size
+    add rbx, rax
     
-    ; Call exception handler directly
-    mov rax, [ivt + rdi * 8]
-    pop rdi                 ; Error code
-    call rax
+    ; Set handler address
+    mov [rbx + idt_entry.offset_low], si
+    shr rsi, 16
+    mov [rbx + idt_entry.offset_mid], si
+    shr rsi, 16
+    mov [rbx + idt_entry.offset_high], esi
     
-    ; Restore context
-    call restore_context
-    
+    xor eax, eax
     jmp .done
     
-.double_fault:
-    ; Triple fault - halt CPU
-    or byte [vm_state + 16], 0x80  ; Set halt flag
+.error:
+    mov eax, -1
     
 .done:
-    pop rcx
     pop rbx
     pop rbp
     ret
 
-; Check for pending interrupts
-; Output: RAX = 1 if interrupt pending, 0 otherwise
-check_interrupts:
-    push rbx
-    push rcx
-    push rdx
-    
-    ; Check if interrupts enabled
-    cmp byte [int_enabled], 0
-    je .no_interrupt
-    
-    ; Check VM interrupt enable flag
-    test byte [vm_state + 16], (1 << 4)
-    jz .no_interrupt
-    
-    ; Find highest priority pending interrupt
-    call get_pending_interrupt
-    test rax, rax
-    js .no_interrupt
-    
-    ; Handle the interrupt
-    mov rdi, rax
-    call handle_interrupt
-    
-    mov rax, 1
-    jmp .done
-    
-.no_interrupt:
-    xor eax, eax
-    
-.done:
-    pop rdx
-    pop rcx
-    pop rbx
-    ret
-
-; Get highest priority pending interrupt
-; Output: RAX = vector (-1 if none)
-get_pending_interrupt:
-    push rbx
-    push rcx
-    push rdx
-    push rsi
-    
-    mov rax, -1             ; Default: no interrupt
-    mov dl, 255             ; Lowest priority
-    
-    ; Scan all vectors
-    xor ecx, ecx
-.scan_loop:
-    ; Check if pending and not masked
-    test byte [int_pending + rcx], 1
-    jz .next
-    test byte [int_masked + rcx], 1
-    jnz .next
-    
-    ; Check priority
-    movzx ebx, byte [int_priority + rcx]
-    
-    ; Check if already in service at this priority
-    test byte [int_in_service + rbx], 1
-    jnz .next
-    
-    ; Compare with current best
-    cmp bl, dl
-    jae .next
-    
-    mov dl, bl              ; New best priority
-    mov eax, ecx            ; New best vector
-    
-.next:
-    inc ecx
-    cmp ecx, MAX_INTERRUPTS
-    jl .scan_loop
-    
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rbx
-    ret
-
-; Set interrupt priority
-; Input: RDI = vector, RSI = priority (0-15)
-set_interrupt_priority:
-    cmp rdi, MAX_INTERRUPTS
-    jae .error
-    cmp rsi, MAX_PRIORITY
-    ja .error
-    
-    mov [int_priority + rdi], sil
-    xor eax, eax
-    ret
-    
-.error:
-    mov rax, -1
-    ret
-
-; Handle interrupt
-; Input: RDI = vector
-handle_interrupt:
+; Trigger interrupt
+; Input: RDI = interrupt number
+global interrupt_trigger
+interrupt_trigger:
     push rbp
     mov rbp, rsp
     push rbx
     
-    ; Save context
-    call save_context
+    ; Check if interrupts are enabled
+    cmp byte [interrupt_state + interrupt_state.enabled], 0
+    je .disabled
+    
+    ; Check interrupt number range
+    cmp rdi, 256
+    jae .error
+    
+    ; Increment nested counter
+    inc byte [interrupt_state + interrupt_state.nested]
+    
+    ; Get handler
+    lea rbx, [interrupt_state + interrupt_state.handlers]
+    mov rax, [rbx + rdi * 8]
     
     ; Update statistics
-    rdtsc
-    push rdx
-    push rax
-    
-    ; Clear pending bit for edge-triggered
-    test byte [int_flags + rdi], INT_FLAG_EDGE
-    jz .skip_clear
-    and byte [int_pending + rdi], 0
-    
-.skip_clear:
-    ; Mark in-service
-    movzx ebx, byte [int_priority + rdi]
-    or byte [int_in_service + rbx], 1
-    
-    ; Increment nesting level
-    inc byte [int_nesting_level]
-    cmp byte [int_nesting_level], 1
-    jne .nested
-    inc qword [int_nested]
-    
-.nested:
-    ; Enable interrupts for nested handling
-    sti
+    lea rbx, [interrupt_state + interrupt_state.stats]
+    inc qword [rbx + rdi * 8]
     
     ; Call handler
-    push rdi                ; Save vector
-    mov rax, [ivt + rdi * 8]
     call rax
-    pop rdi
     
-    ; Disable interrupts
-    cli
+    ; Decrement nested counter
+    dec byte [interrupt_state + interrupt_state.nested]
     
-    ; Auto EOI if configured
-    test byte [int_flags + rdi], INT_FLAG_AUTO_EOI
-    jz .no_auto_eoi
-    call interrupt_eoi
+    xor eax, eax
+    jmp .done
     
-.no_auto_eoi:
-    ; Decrement nesting level
-    dec byte [int_nesting_level]
+.disabled:
+    mov eax, -2
+    jmp .done
     
-    ; Update cycle count
-    rdtsc
-    pop rbx                 ; Original low
-    pop rcx                 ; Original high
-    sub rax, rbx
-    sbb rdx, rcx
-    add [int_cycles], rax
-    adc [int_cycles + 8], rdx
+.error:
+    mov eax, -1
     
-    ; Restore context
-    call restore_context
-    
+.done:
     pop rbx
     pop rbp
     ret
 
-; Save CPU context
-save_context:
-    push rdi
+; Interrupt dispatcher (called by hardware)
+global interrupt_dispatch
+interrupt_dispatch:
+    ; Save all registers
+    push rax
     push rcx
-    
-    ; Save all GPRs
-    lea rdi, [saved_context]
-    lea rsi, [vm_state + 24]    ; VM_GPRS
-    mov ecx, 32
-    rep movsq
-    
-    pop rcx
-    pop rdi
-    ret
-
-; Restore CPU context
-restore_context:
+    push rdx
+    push rbx
+    push rbp
     push rsi
     push rdi
-    push rcx
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
     
-    ; Restore all GPRs
-    lea rsi, [saved_context]
-    lea rdi, [vm_state + 24]    ; VM_GPRS
-    mov ecx, 32
-    rep movsq
+    ; Get interrupt number from stack
+    mov rax, [rsp + 15 * 8]  ; RIP was pushed by hardware
     
-    pop rcx
+    ; Check if it's a system call
+    cmp rax, INT_SYSCALL
+    je .syscall
+    
+    ; Regular interrupt
+    mov rdi, rax
+    call interrupt_trigger
+    jmp .restore
+    
+.syscall:
+    ; Handle system call
+    call syscall_handler
+    
+.restore:
+    ; Restore registers
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
     pop rdi
     pop rsi
-    ret
-
-; Default interrupt handler
-default_handler:
-    ; Just return - interrupt ignored
-    ret
-
-; Exception handlers
-
-; Divide error exception
-exc_divide_error:
-    push rbp
-    mov rbp, rsp
-    
-    ; Set exception flag in VM
-    or byte [vm_state + 16], 0x80  ; Halt
-    
-    ; Could implement recovery logic here
-    
     pop rbp
-    ret
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    
+    iretq
 
-; Page fault exception
-; Input: RDI = error code
-exc_page_fault:
+; Exception handler wrapper
+; Input: RDI = exception number, RSI = error code, RDX = fault address
+global exception_handler
+exception_handler:
     push rbp
     mov rbp, rsp
     push rbx
+    push r12
+    push r13
+    push r14
     
-    ; Get faulting address (would be in CR2 on real x86)
-    ; For now, use the current PC
-    mov rbx, [vm_state + 0]     ; VM_PC
+    mov r12, rdi  ; Exception number
+    mov r13, rsi  ; Error code
+    mov r14, rdx  ; Fault address
     
-    ; Extract error code bits
-    mov rax, rdi
-    and rax, 0x7                ; P, W, U bits
+    ; Log exception
+    lea rbx, [interrupt_state + interrupt_state.stats]
+    inc qword [rbx + r12 * 8]
     
-    ; Call page fault handler in memory subsystem
-    mov rdi, rbx                ; Faulting address
-    mov rsi, rax                ; Fault type
-    extern page_fault_handler
-    call page_fault_handler
+    ; Handle specific exceptions
+    cmp r12, INT_PAGE_FAULT
+    je .page_fault
     
-    ; Check if handled successfully
-    test rax, rax
-    jnz .fatal
+    cmp r12, INT_DIVIDE_ERROR
+    je .divide_error
     
-    ; Successfully handled - return
+    cmp r12, INT_INVALID_OPCODE
+    je .invalid_opcode
+    
+    ; Default: halt VM
+    jmp .halt
+    
+.page_fault:
+    ; Handle page fault
+    mov rdi, r14  ; Fault address
+    mov rsi, r13  ; Error code
+    call handle_page_fault
     jmp .done
     
-.fatal:
-    ; Unhandled page fault - halt
-    or byte [vm_state + 16], 0x80
+.divide_error:
+    ; Handle divide by zero
+    call handle_divide_error
+    jmp .done
+    
+.invalid_opcode:
+    ; Handle invalid opcode
+    call handle_invalid_opcode
+    jmp .done
+    
+.halt:
+    ; Halt VM on unhandled exception
+    lea rbx, [vm_state]
+    or byte [rbx + VM_FLAGS], 0x80  ; Set halt flag
     
 .done:
+    pop r14
+    pop r13
+    pop r12
     pop rbx
     pop rbp
     ret
 
-; General protection fault
-exc_general_protection:
+; System call handler
+; Input: RAX = system call number, RDI-RSI-RDX-R10-R8-R9 = arguments
+global syscall_handler
+syscall_handler:
     push rbp
     mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
     
-    ; Log the fault
-    inc qword [int_count + EXC_GENERAL_PROTECTION * 8]
+    mov r12, rax  ; System call number
     
-    ; Halt VM
-    or byte [vm_state + 16], 0x80
+    ; Update statistics
+    lea rbx, [interrupt_state + interrupt_state.stats]
+    inc qword [rbx + INT_SYSCALL * 8]
     
-    pop rbp
-    ret
-
-; Invalid opcode exception
-exc_invalid_opcode:
-    push rbp
-    mov rbp, rsp
+    ; Dispatch system call
+    cmp r12, 0
+    je .syscall_exit
+    cmp r12, 1
+    je .syscall_read
+    cmp r12, 2
+    je .syscall_write
+    cmp r12, 3
+    je .syscall_open
+    cmp r12, 4
+    je .syscall_close
+    cmp r12, 5
+    je .syscall_brk
+    cmp r12, 6
+    je .syscall_gettime
+    cmp r12, 7
+    je .syscall_sleep
+    cmp r12, 8
+    je .syscall_fork
+    cmp r12, 9
+    je .syscall_exec
+    cmp r12, 10
+    je .syscall_wait
     
-    ; Could implement opcode emulation here
-    
-    ; For now, just halt
-    or byte [vm_state + 16], 0x80
-    
-    pop rbp
-    ret
-
-; Software interrupt handler (INT instruction)
-; Input: RDI = interrupt vector
-interrupt_handler:
-    push rbp
-    mov rbp, rsp
-    
-    ; Validate vector
-    cmp rdi, MAX_INTERRUPTS
-    jae .invalid
-    
-    ; Check if masked
-    test byte [int_masked + rdi], 1
-    jnz .masked
-    
-    ; Raise the interrupt
-    call raise_interrupt
-    
-    ; Process immediately if enabled
-    call check_interrupts
-    
+    ; Unknown system call
+    mov rax, -1
     jmp .done
     
-.invalid:
-.masked:
-    ; Return error in RAX
-    mov rax, -1
+.syscall_exit:
+    ; Exit process
+    mov rdi, rdi  ; Exit code
+    call handle_exit
+    jmp .done
+    
+.syscall_read:
+    ; Read from file
+    mov rdi, rdi  ; File descriptor
+    mov rsi, rsi  ; Buffer
+    mov rdx, rdx  ; Count
+    call handle_read
+    jmp .done
+    
+.syscall_write:
+    ; Write to file
+    mov rdi, rdi  ; File descriptor
+    mov rsi, rsi  ; Buffer
+    mov rdx, rdx  ; Count
+    call handle_write
+    jmp .done
+    
+.syscall_open:
+    ; Open file
+    mov rdi, rdi  ; Pathname
+    mov rsi, rsi  ; Flags
+    mov rdx, rdx  ; Mode
+    call handle_open
+    jmp .done
+    
+.syscall_close:
+    ; Close file
+    mov rdi, rdi  ; File descriptor
+    call handle_close
+    jmp .done
+    
+.syscall_brk:
+    ; Change data segment size
+    mov rdi, rdi  ; New break
+    call handle_brk
+    jmp .done
+    
+.syscall_gettime:
+    ; Get current time
+    call handle_gettime
+    jmp .done
+    
+.syscall_sleep:
+    ; Sleep for specified time
+    mov rdi, rdi  ; Seconds
+    call handle_sleep
+    jmp .done
+    
+.syscall_fork:
+    ; Create new process
+    call handle_fork
+    jmp .done
+    
+.syscall_exec:
+    ; Execute new program
+    mov rdi, rdi  ; Pathname
+    mov rsi, rsi  ; Arguments
+    call handle_exec
+    jmp .done
+    
+.syscall_wait:
+    ; Wait for child process
+    mov rdi, rdi  ; Status pointer
+    call handle_wait
+    jmp .done
     
 .done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
     pop rbp
     ret
 
-; Timer interrupt handler (example device interrupt)
-global timer_interrupt
-timer_interrupt:
+; Default interrupt handlers
+
+divide_error_handler:
+    mov rdi, INT_DIVIDE_ERROR
+    xor rsi, rsi
+    xor rdx, rdx
+    call exception_handler
+    iretq
+
+debug_handler:
+    iretq
+
+nmi_handler:
+    iretq
+
+breakpoint_handler:
+    mov rdi, INT_BREAKPOINT
+    xor rsi, rsi
+    xor rdx, rdx
+    call exception_handler
+    iretq
+
+overflow_handler:
+    mov rdi, INT_OVERFLOW
+    xor rsi, rsi
+    xor rdx, rdx
+    call exception_handler
+    iretq
+
+bound_range_handler:
+    iretq
+
+invalid_opcode_handler:
+    mov rdi, INT_INVALID_OPCODE
+    xor rsi, rsi
+    xor rdx, rdx
+    call exception_handler
+    iretq
+
+device_not_available_handler:
+    iretq
+
+double_fault_handler:
+    mov rdi, INT_DOUBLE_FAULT
+    xor rsi, rsi
+    xor rdx, rdx
+    call exception_handler
+    iretq
+
+coprocessor_segment_handler:
+    iretq
+
+invalid_tss_handler:
+    iretq
+
+segment_not_present_handler:
+    iretq
+
+stack_segment_fault_handler:
+    iretq
+
+general_protection_handler:
+    iretq
+
+page_fault_handler:
+    mov rdi, INT_PAGE_FAULT
+    mov rsi, [rsp + 8]  ; Error code
+    mov rdx, cr2        ; Fault address
+    call exception_handler
+    iretq
+
+reserved_handler:
+    iretq
+
+fpu_error_handler:
+    iretq
+
+alignment_check_handler:
+    iretq
+
+machine_check_handler:
+    iretq
+
+simd_exception_handler:
+    iretq
+
+virtualization_exception_handler:
+    iretq
+
+; Exception handling functions
+
+handle_page_fault:
     push rbp
     mov rbp, rsp
     
-    ; Update timer counter
-    inc qword [vm_state + 0x200]  ; Example timer location
-    
-    ; Check for timer callbacks
-    ; ... implementation ...
+    ; For now, just return error
+    mov rax, -1
     
     pop rbp
     ret
 
-; Enable/disable specific CPU features
-global sti  ; Enable interrupts
-sti:
-    call interrupt_enable
+handle_divide_error:
+    push rbp
+    mov rbp, rsp
+    
+    ; For now, just return error
+    mov rax, -1
+    
+    pop rbp
     ret
 
-global cli  ; Disable interrupts
-cli:
-    call interrupt_disable
+handle_invalid_opcode:
+    push rbp
+    mov rbp, rsp
+    
+    ; For now, just return error
+    mov rax, -1
+    
+    pop rbp
+    ret
+
+; System call handling functions
+
+handle_exit:
+    push rbp
+    mov rbp, rsp
+    
+    ; Set exit code and halt VM
+    lea rbx, [vm_state]
+    mov [rbx + VM_GPRS + 0 * 8], rdi  ; Store exit code in R0
+    or byte [rbx + VM_FLAGS], 0x80    ; Set halt flag
+    
+    mov rax, 0
+    pop rbp
+    ret
+
+handle_read:
+    push rbp
+    mov rbp, rsp
+    
+    ; For now, just return 0 (no data read)
+    mov rax, 0
+    
+    pop rbp
+    ret
+
+handle_write:
+    push rbp
+    mov rbp, rsp
+    
+    ; For now, just return count (all bytes written)
+    mov rax, rdx
+    
+    pop rbp
+    ret
+
+handle_open:
+    push rbp
+    mov rbp, rsp
+    
+    ; For now, just return -1 (error)
+    mov rax, -1
+    
+    pop rbp
+    ret
+
+handle_close:
+    push rbp
+    mov rbp, rsp
+    
+    ; For now, just return 0 (success)
+    mov rax, 0
+    
+    pop rbp
+    ret
+
+handle_brk:
+    push rbp
+    mov rbp, rsp
+    
+    ; For now, just return current break
+    mov rax, 0x1000000  ; 16MB
+    
+    pop rbp
+    ret
+
+handle_gettime:
+    push rbp
+    mov rbp, rsp
+    
+    ; For now, just return 0
+    mov rax, 0
+    
+    pop rbp
+    ret
+
+handle_sleep:
+    push rbp
+    mov rbp, rsp
+    
+    ; For now, just return 0
+    mov rax, 0
+    
+    pop rbp
+    ret
+
+handle_fork:
+    push rbp
+    mov rbp, rsp
+    
+    ; For now, just return -1 (error)
+    mov rax, -1
+    
+    pop rbp
+    ret
+
+handle_exec:
+    push rbp
+    mov rbp, rsp
+    
+    ; For now, just return -1 (error)
+    mov rax, -1
+    
+    pop rbp
+    ret
+
+handle_wait:
+    push rbp
+    mov rbp, rsp
+    
+    ; For now, just return -1 (error)
+    mov rax, -1
+    
+    pop rbp
     ret

@@ -1,249 +1,258 @@
-# NanoCore Makefile - High-Performance Build System
+# NanoCore VM Makefile
+# Builds the expert-level virtual machine
 
-# Build Configuration
-PLATFORM ?= linux
-ARCH ?= x64
-CC ?= gcc
-AS ?= nasm
-LD ?= ld
-AR ?= ar
+# Configuration
+VERSION = 1.0.0
+PRODUCT_NAME = NanoCore VM
 
 # Directories
-BUILD_DIR := build
-OBJ_DIR := $(BUILD_DIR)/obj
-BIN_DIR := $(BUILD_DIR)/bin
-LIB_DIR := $(BUILD_DIR)/lib
+BUILD_DIR = build
+OBJ_DIR = $(BUILD_DIR)/obj
+BIN_DIR = $(BUILD_DIR)/bin
+LIB_DIR = $(BUILD_DIR)/lib
 
-# Source Directories
-ASM_CORE_DIR := asm/core
-ASM_DEVICES_DIR := asm/devices
-ASM_LABS_DIR := asm/labs
-GLUE_DIR := glue
-CLI_DIR := cli
-TEST_DIR := tests
+# Source directories
+ASM_CORE_DIR = asm/core
+ASM_DEVICES_DIR = asm/devices
+ASM_LABS_DIR = asm/labs
+GLUE_DIR = glue
+CLI_DIR = cli
+TEST_DIR = tests
 
-# Flags
-ASFLAGS := -f elf64 -g -F dwarf
-LDFLAGS := -nostdlib -static
-CFLAGS := -O3 -march=native -mtune=native -Wall -Wextra -fno-stack-protector
-CXXFLAGS := $(CFLAGS) -std=c++20
+# Compiler and assembler
+CC = gcc
+AS = nasm
+AR = ar
+LD = ld
 
-# Performance Flags
-ifdef NANOCORE_ENABLE_LTO
-    CFLAGS += -flto
-    LDFLAGS += -flto
+# Detect OS
+ifeq ($(OS),Windows_NT)
+    PLATFORM = win64
+    BIN_EXT = .exe
+    LIB_EXT = .dll
+    STATIC_LIB_EXT = .lib
+    OBJ_EXT = .obj
+    ASFLAGS = -f win64 -g -F cv8
+    CFLAGS = -O2 -Wall -Wextra -std=c99 -D_CRT_SECURE_NO_WARNINGS
+    LDFLAGS = -static
+else
+    PLATFORM = elf64
+    BIN_EXT = 
+    LIB_EXT = .so
+    STATIC_LIB_EXT = .a
+    OBJ_EXT = .o
+    ASFLAGS = -f elf64 -g -F dwarf
+    CFLAGS = -O2 -Wall -Wextra -std=c99 -fPIC
+    LDFLAGS = 
 endif
 
-ifdef NANOCORE_ENABLE_PGO
-    CFLAGS += -fprofile-generate
-    LDFLAGS += -fprofile-generate
+# Debug flags
+ifeq ($(DEBUG),1)
+    CFLAGS += -g -DDEBUG
+    ASFLAGS += -g
+else
+    CFLAGS += -DNDEBUG
 endif
 
-# Platform-specific settings
-ifeq ($(PLATFORM),darwin)
-    ASFLAGS := -f macho64
-    LDFLAGS := -macosx_version_min 10.15 -lSystem
+# Optimization flags
+ifeq ($(RELEASE),1)
+    CFLAGS += -O3 -march=native
+    ASFLAGS += -O2
 endif
 
-ifeq ($(PLATFORM),win64)
-    ASFLAGS := -f win64
-    LDFLAGS := -subsystem:console
+# Target binaries
+NANOCORE_CLI = $(BIN_DIR)/nanocore-cli$(BIN_EXT)
+NANOCORE_LIB = $(LIB_DIR)/libnanocore$(STATIC_LIB_EXT)
+NANOCORE_SHARED = $(LIB_DIR)/libnanocore$(LIB_EXT)
+
+# Assembly source files
+ASM_CORE_SOURCES = $(wildcard $(ASM_CORE_DIR)/*.asm)
+ASM_DEVICE_SOURCES = $(wildcard $(ASM_DEVICES_DIR)/*.asm)
+ASM_LAB_SOURCES = $(wildcard $(ASM_LABS_DIR)/*.asm)
+
+# C source files
+C_SOURCES = $(wildcard $(CLI_DIR)/*.c)
+C_SOURCES += $(wildcard $(GLUE_DIR)/c/*.c)
+
+# Object files
+ASM_CORE_OBJECTS = $(ASM_CORE_SOURCES:$(ASM_CORE_DIR)/%.asm=$(OBJ_DIR)/%.o)
+ASM_DEVICE_OBJECTS = $(ASM_DEVICE_SOURCES:$(ASM_DEVICES_DIR)/%.asm=$(OBJ_DIR)/%.o)
+ASM_LAB_OBJECTS = $(ASM_LAB_SOURCES:$(ASM_LABS_DIR)/%.asm=$(OBJ_DIR)/%.o)
+C_OBJECTS = $(C_SOURCES:%.c=$(OBJ_DIR)/%.o)
+
+ALL_OBJECTS = $(ASM_CORE_OBJECTS) $(ASM_DEVICE_OBJECTS) $(ASM_LAB_OBJECTS) $(C_OBJECTS)
+
+# Default target
+.PHONY: all
+all: directories $(NANOCORE_CLI) $(NANOCORE_LIB) $(NANOCORE_SHARED)
+
+# Create build directories
+.PHONY: directories
+directories:
+	@echo "Creating build directories..."
+	@mkdir -p $(BUILD_DIR) $(OBJ_DIR) $(BIN_DIR) $(LIB_DIR)
+	@mkdir -p $(OBJ_DIR)/$(ASM_CORE_DIR) $(OBJ_DIR)/$(ASM_DEVICES_DIR) $(OBJ_DIR)/$(ASM_LABS_DIR)
+	@mkdir -p $(OBJ_DIR)/$(CLI_DIR) $(OBJ_DIR)/$(GLUE_DIR)
+
+# Build CLI executable
+$(NANOCORE_CLI): $(C_OBJECTS) $(NANOCORE_LIB)
+	@echo "Linking $@..."
+	$(CC) $(C_OBJECTS) -L$(LIB_DIR) -lnanocore $(LDFLAGS) -o $@
+
+# Build static library
+$(NANOCORE_LIB): $(ASM_CORE_OBJECTS) $(ASM_DEVICE_OBJECTS) $(ASM_LAB_OBJECTS)
+	@echo "Creating static library $@..."
+	$(AR) rcs $@ $^
+
+# Build shared library
+$(NANOCORE_SHARED): $(ASM_CORE_OBJECTS) $(ASM_DEVICE_OBJECTS) $(ASM_LAB_OBJECTS)
+	@echo "Creating shared library $@..."
+ifeq ($(OS),Windows_NT)
+	$(CC) -shared -o $@ $^ $(LDFLAGS)
+else
+	$(CC) -shared -o $@ $^ $(LDFLAGS)
 endif
 
-# Core VM Objects
-VM_OBJECTS := \
-    $(OBJ_DIR)/vm.o \
-    $(OBJ_DIR)/memory.o \
-    $(OBJ_DIR)/alu.o \
-    $(OBJ_DIR)/pipeline.o \
-    $(OBJ_DIR)/cache.o \
-    $(OBJ_DIR)/interrupts.o \
-    $(OBJ_DIR)/instructions.o \
-    $(OBJ_DIR)/devices.o
+# Compile C files
+$(OBJ_DIR)/%.o: %.c
+	@echo "Compiling $<..."
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
 
-# Device Objects
-DEVICE_OBJECTS := \
-    $(OBJ_DIR)/console.o
-
-# Targets
-.PHONY: all clean vm bindings tests benchmarks docs release-all
-
-all: vm bindings cli tests
-
-# Create directories
-$(BUILD_DIR) $(OBJ_DIR) $(BIN_DIR) $(LIB_DIR):
-	@mkdir -p $@
-
-# Core VM
-vm: $(BIN_DIR)/nanocore
-
-$(BIN_DIR)/nanocore: $(VM_OBJECTS) $(DEVICE_OBJECTS) | $(BIN_DIR)
-	@echo "Linking NanoCore VM..."
-	$(LD) $(LDFLAGS) -o $@ $^
-	@echo "Stripping debug symbols for release..."
-	strip -s $@
-	@echo "VM built successfully: $@"
-
-# Assembly Rules
-$(OBJ_DIR)/%.o: $(ASM_CORE_DIR)/%.asm | $(OBJ_DIR)
+# Assemble NASM files
+$(OBJ_DIR)/%.o: %.asm
 	@echo "Assembling $<..."
-	$(AS) $(ASFLAGS) -o $@ $<
+	@mkdir -p $(dir $@)
+	$(AS) $(ASFLAGS) $< -o $@
 
-$(OBJ_DIR)/%.o: $(ASM_DEVICES_DIR)/%.asm | $(OBJ_DIR)
-	@echo "Assembling $<..."
-	$(AS) $(ASFLAGS) -o $@ $<
+# Test targets
+.PHONY: test
+test: all
+	@echo "Running tests..."
+	@python test_expert.py
 
-# Language Bindings
-bindings: rust-ffi python-binding js-binding
+.PHONY: test-simple
+test-simple: all
+	@echo "Running simple test..."
+	@python test_simple.py
 
-rust-ffi: $(LIB_DIR)/libnanocore.so
-	@echo "Building Rust FFI..."
-	cd $(GLUE_DIR)/ffi && cargo build --release
-	cp $(GLUE_DIR)/ffi/target/release/libnanocore_ffi.* $(LIB_DIR)/
-
-python-binding: $(LIB_DIR)/libnanocore.so
-	@echo "Building Python bindings..."
-	cd $(GLUE_DIR)/python && python3 setup.py build_ext --inplace
-	cp $(GLUE_DIR)/python/*.so $(LIB_DIR)/
-
-js-binding: $(LIB_DIR)/libnanocore.so
-	@echo "Building JavaScript bindings..."
-	cd $(GLUE_DIR)/js && npm install && npm run build
-	cp $(GLUE_DIR)/js/build/Release/*.node $(LIB_DIR)/
-
-$(LIB_DIR)/libnanocore.so: $(VM_OBJECTS) $(DEVICE_OBJECTS) | $(LIB_DIR)
-	@echo "Creating shared library..."
-	$(CC) -shared -fPIC $(LDFLAGS) -o $@ $^
-
-# CLI
-cli: $(BIN_DIR)/nanocore-cli
-
-$(BIN_DIR)/nanocore-cli: $(CLI_DIR)/main.c $(LIB_DIR)/libnanocore.so | $(BIN_DIR)
-	@echo "Building CLI..."
-	$(CC) $(CFLAGS) -o $@ $< -L$(LIB_DIR) -lnanocore -Wl,-rpath,$(LIB_DIR)
-
-# Tests
-tests: test-isa test-unit test-integration test-performance
-
-test-isa:
-	@echo "Running ISA compliance tests..."
-	@for test in $(TEST_DIR)/isa/*.asm; do \
-		echo "Testing $$test..."; \
-		$(AS) $(ASFLAGS) -o $(OBJ_DIR)/$$(basename $$test .asm).o $$test; \
-		$(BIN_DIR)/nanocore --test $(OBJ_DIR)/$$(basename $$test .asm).o; \
-	done
-
-test-unit:
-	@echo "Running unit tests..."
-	$(CC) $(CFLAGS) -o $(BIN_DIR)/test-unit $(TEST_DIR)/unit/*.c -L$(LIB_DIR) -lnanocore
-	$(BIN_DIR)/test-unit
-
-test-integration:
-	@echo "Running integration tests..."
-	python3 $(TEST_DIR)/integration/run_tests.py
-
-test-performance:
-	@echo "Running performance tests..."
-	$(BIN_DIR)/nanocore --benchmark > $(BUILD_DIR)/perf-results.json
-
-test-valgrind: vm
-	@echo "Running memory leak tests..."
-	valgrind --leak-check=full --show-leak-kinds=all \
-		--track-origins=yes --verbose \
-		$(BIN_DIR)/nanocore $(ASM_LABS_DIR)/hello_world.asm
-
-test-security:
-	@echo "Running security tests..."
-	# Stack canary tests
-	$(CC) $(CFLAGS) -fstack-protector-strong -o $(BIN_DIR)/test-security \
-		$(TEST_DIR)/security/*.c -L$(LIB_DIR) -lnanocore
-	$(BIN_DIR)/test-security
-
-# Benchmarks
-benchmarks: $(BIN_DIR)/benchmark
-
-$(BIN_DIR)/benchmark: $(TEST_DIR)/benchmarks/*.c $(LIB_DIR)/libnanocore.so | $(BIN_DIR)
-	@echo "Building benchmarks..."
-	$(CC) $(CFLAGS) -o $@ $(TEST_DIR)/benchmarks/*.c -L$(LIB_DIR) -lnanocore -lm
-	@echo "Running benchmarks..."
-	$@ --json > $(BUILD_DIR)/benchmarks.json
-	$@ --compare baseline.json
-
-# Documentation
-docs:
-	@echo "Building documentation..."
-	cd docs && make html pdf
-
-# Coverage
-coverage:
-	@echo "Building with coverage..."
-	$(MAKE) clean
-	$(MAKE) CFLAGS="$(CFLAGS) --coverage" LDFLAGS="$(LDFLAGS) --coverage" all
-	$(MAKE) tests
-	lcov --capture --directory . --output-file coverage.info
-	genhtml coverage.info --output-directory $(BUILD_DIR)/coverage
-
-# Release
-release-all:
-	@echo "Building release artifacts..."
-	$(MAKE) clean
-	$(MAKE) NANOCORE_ENABLE_LTO=1 vm
-	$(MAKE) bindings
-	@mkdir -p dist
-	tar -czf dist/nanocore-$(PLATFORM)-$(ARCH).tar.gz \
-		$(BIN_DIR)/nanocore $(LIB_DIR)/* README.md LICENSE docs/
-
-# Clean
+# Clean targets
+.PHONY: clean
 clean:
 	@echo "Cleaning build artifacts..."
-	rm -rf $(BUILD_DIR) dist/
+	rm -rf $(BUILD_DIR)
 
-# Install
-install: vm cli
-	@echo "Installing NanoCore..."
-	install -m 755 $(BIN_DIR)/nanocore /usr/local/bin/
-	install -m 755 $(BIN_DIR)/nanocore-cli /usr/local/bin/
-	install -m 644 $(LIB_DIR)/libnanocore.so /usr/local/lib/
-	ldconfig
+.PHONY: distclean
+distclean: clean
+	@echo "Cleaning all generated files..."
+	rm -f *.o *.a *.so *.dll *.exe
+	rm -f test_*.bin
 
-# Development helpers
-.PHONY: format lint profile
+# Install targets
+.PHONY: install
+install: all
+	@echo "Installing NanoCore VM..."
+ifeq ($(OS),Windows_NT)
+	@powershell -ExecutionPolicy Bypass -File install.ps1
+else
+	@chmod +x install.sh
+	@./install.sh
+endif
 
-format:
-	@echo "Formatting code..."
-	find . -name "*.c" -o -name "*.h" | xargs clang-format -i
-	cd $(GLUE_DIR)/ffi && cargo fmt
+.PHONY: install-user
+install-user: all
+	@echo "Installing NanoCore VM (user mode)..."
+ifeq ($(OS),Windows_NT)
+	@powershell -ExecutionPolicy Bypass -File install.ps1 -UserInstall
+else
+	@chmod +x install.sh
+	@./install.sh --user
+endif
 
-lint:
-	@echo "Linting code..."
-	cppcheck --enable=all --suppress=missingIncludeSystem $(CLI_DIR) $(TEST_DIR)
-	cd $(GLUE_DIR)/ffi && cargo clippy
+# Development targets
+.PHONY: debug
+debug: CFLAGS += -g -DDEBUG
+debug: ASFLAGS += -g
+debug: all
 
-profile: vm
-	@echo "Profiling VM..."
-	perf record -g $(BIN_DIR)/nanocore $(ASM_LABS_DIR)/mandelbrot.asm
-	perf report
+.PHONY: release
+release: CFLAGS += -O3 -DNDEBUG
+release: ASFLAGS += -O2
+release: all
 
-# Help
+# Documentation
+.PHONY: docs
+docs:
+	@echo "Generating documentation..."
+	@mkdir -p docs
+	@echo "# NanoCore VM Documentation" > docs/README.md
+	@echo "" >> docs/README.md
+	@echo "## Version: $(VERSION)" >> docs/README.md
+	@echo "## Build Date: $(shell date)" >> docs/README.md
+
+# Package targets
+.PHONY: package
+package: clean all docs
+	@echo "Creating package..."
+	@mkdir -p dist
+	@tar -czf dist/nanocore-$(VERSION).tar.gz \
+		--exclude=build \
+		--exclude=.git \
+		--exclude=*.o \
+		--exclude=*.a \
+		--exclude=*.so \
+		--exclude=*.dll \
+		--exclude=*.exe \
+		.
+
+# Help target
+.PHONY: help
 help:
-	@echo "NanoCore Build System"
-	@echo "===================="
-	@echo "Targets:"
-	@echo "  all          - Build everything"
-	@echo "  vm           - Build core VM"
-	@echo "  bindings     - Build language bindings"
-	@echo "  cli          - Build CLI tool"
-	@echo "  tests        - Run all tests"
-	@echo "  benchmarks   - Run performance benchmarks"
-	@echo "  docs         - Build documentation"
-	@echo "  clean        - Clean build artifacts"
+	@echo "$(PRODUCT_NAME) v$(VERSION) - Build System"
+	@echo ""
+	@echo "Available targets:"
+	@echo "  all          - Build everything (default)"
+	@echo "  clean        - Remove build artifacts"
+	@echo "  distclean    - Remove all generated files"
+	@echo "  debug        - Build with debug symbols"
+	@echo "  release      - Build optimized release version"
+	@echo "  test         - Run all tests"
+	@echo "  test-simple  - Run simple test"
 	@echo "  install      - Install system-wide"
+	@echo "  install-user - Install for current user only"
+	@echo "  docs         - Generate documentation"
+	@echo "  package      - Create distribution package"
+	@echo "  help         - Show this help message"
 	@echo ""
 	@echo "Variables:"
-	@echo "  PLATFORM     - Target platform (linux/darwin/win64)"
-	@echo "  ARCH         - Target architecture (x64/arm64)"
-	@echo "  CC           - C compiler (gcc/clang)"
+	@echo "  DEBUG=1      - Enable debug build"
+	@echo "  RELEASE=1    - Enable release optimizations"
+	@echo "  CC=compiler  - Set C compiler"
+	@echo "  AS=assembler - Set assembler"
 	@echo ""
 	@echo "Examples:"
-	@echo "  make PLATFORM=darwin ARCH=arm64"
-	@echo "  make NANOCORE_ENABLE_LTO=1 NANOCORE_ENABLE_PGO=1"
+	@echo "  make                    # Build everything"
+	@echo "  make debug              # Debug build"
+	@echo "  make install            # Install system-wide"
+	@echo "  make install-user       # User installation"
+	@echo "  make test               # Run tests"
+
+# Dependencies
+-include $(ALL_OBJECTS:.o=.d)
+
+# Generate dependency files
+%.d: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -MM -MT $(@:.d=.o) $< > $@
+
+# Show build info
+.PHONY: info
+info:
+	@echo "$(PRODUCT_NAME) v$(VERSION)"
+	@echo "Platform: $(PLATFORM)"
+	@echo "Compiler: $(CC)"
+	@echo "Assembler: $(AS)"
+	@echo "Build directory: $(BUILD_DIR)"
+	@echo "Installation:"
+	@echo "  Windows: powershell -ExecutionPolicy Bypass -File install.ps1"
+	@echo "  Linux/macOS: ./install.sh"

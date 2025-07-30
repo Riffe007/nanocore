@@ -1,727 +1,528 @@
-; NanoCore Instruction Implementations
-; Complete implementation of all ISA instructions
+; NanoCore Instructions Module
+; Handles instruction decoding and execution
 
 BITS 64
 SECTION .text
 
 ; External symbols
 extern vm_state
-extern update_flags
+extern alu_add
+extern alu_sub
+extern alu_mul
+extern alu_div
+extern alu_and
+extern alu_or
+extern alu_xor
+extern alu_not
+extern alu_shl
+extern alu_shr
+extern alu_sar
+extern alu_rol
+extern alu_ror
+extern alu_cmp
+extern alu_test
 extern memory_read
 extern memory_write
-extern tlb_lookup
-extern raise_exception
-
-; Instruction implementations
-
-; SUB - Subtract
-; Format: SUB rd, rs1, rs2
-global execute_sub
-execute_sub:
-    push rbp
-    mov rbp, rsp
-    
-    ; Extract operands
-    mov eax, ebx
-    shr eax, 21
-    and eax, 0x1F  ; rd
-    
-    mov ecx, ebx
-    shr ecx, 16
-    and ecx, 0x1F  ; rs1
-    
-    mov edx, ebx
-    shr edx, 11
-    and edx, 0x1F  ; rs2
-    
-    ; Load operands
-    mov r8, [r13 + VM_GPRS + rcx * 8]
-    mov r9, [r13 + VM_GPRS + rdx * 8]
-    
-    ; Perform subtraction
-    sub r8, r9
-    
-    ; Store result (skip if rd = 0)
-    test eax, eax
-    jz .done
-    mov [r13 + VM_GPRS + rax * 8], r8
-    
-    ; Update flags
-    pushfq
-    pop rax
-    call update_flags
-    
-.done:
-    pop rbp
-    ret
-
-; MUL - Multiply (low 64 bits)
-global execute_mul
-execute_mul:
-    push rbp
-    mov rbp, rsp
-    push rdx
-    
-    ; Extract operands
-    mov eax, ebx
-    shr eax, 21
-    and eax, 0x1F  ; rd
-    
-    mov ecx, ebx
-    shr ecx, 16
-    and ecx, 0x1F  ; rs1
-    
-    mov edx, ebx
-    shr edx, 11
-    and edx, 0x1F  ; rs2
-    
-    ; Load operands
-    mov r8, [r13 + VM_GPRS + rcx * 8]
-    mov rax, [r13 + VM_GPRS + rdx * 8]
-    
-    ; Perform multiplication
-    mul r8  ; Result in RDX:RAX
-    
-    ; Store low 64 bits (skip if rd = 0)
-    mov ecx, ebx
-    shr ecx, 21
-    and ecx, 0x1F
-    test ecx, ecx
-    jz .done
-    mov [r13 + VM_GPRS + rcx * 8], rax
-    
-    ; Check for overflow
-    test rdx, rdx
-    jz .no_overflow
-    or byte [r13 + VM_FLAGS], (1 << FLAG_OVERFLOW)
-    
-.no_overflow:
-.done:
-    pop rdx
-    pop rbp
-    ret
-
-; MULH - Multiply (high 64 bits)
-global execute_mulh
-execute_mulh:
-    push rbp
-    mov rbp, rsp
-    push rdx
-    
-    ; Extract operands
-    mov eax, ebx
-    shr eax, 21
-    and eax, 0x1F  ; rd
-    
-    mov ecx, ebx
-    shr ecx, 16
-    and ecx, 0x1F  ; rs1
-    
-    mov edx, ebx
-    shr edx, 11
-    and edx, 0x1F  ; rs2
-    
-    ; Load operands
-    mov r8, [r13 + VM_GPRS + rcx * 8]
-    mov rax, [r13 + VM_GPRS + rdx * 8]
-    
-    ; Perform multiplication
-    mul r8  ; Result in RDX:RAX
-    
-    ; Store high 64 bits (skip if rd = 0)
-    mov ecx, ebx
-    shr ecx, 21
-    and ecx, 0x1F
-    test ecx, ecx
-    jz .done
-    mov [r13 + VM_GPRS + rcx * 8], rdx
-    
-.done:
-    pop rdx
-    pop rbp
-    ret
-
-; DIV - Unsigned divide
-global execute_div
-execute_div:
-    push rbp
-    mov rbp, rsp
-    push rdx
-    
-    ; Extract operands
-    mov eax, ebx
-    shr eax, 21
-    and eax, 0x1F  ; rd
-    
-    mov ecx, ebx
-    shr ecx, 16
-    and ecx, 0x1F  ; rs1
-    
-    mov edx, ebx
-    shr edx, 11
-    and edx, 0x1F  ; rs2
-    
-    ; Load divisor and check for zero
-    mov r9, [r13 + VM_GPRS + rdx * 8]
-    test r9, r9
-    jz .divide_by_zero
-    
-    ; Load dividend
-    mov rax, [r13 + VM_GPRS + rcx * 8]
-    xor edx, edx
-    
-    ; Perform division
-    div r9  ; Quotient in RAX
-    
-    ; Store result (skip if rd = 0)
-    mov ecx, ebx
-    shr ecx, 21
-    and ecx, 0x1F
-    test ecx, ecx
-    jz .done
-    mov [r13 + VM_GPRS + rcx * 8], rax
-    jmp .done
-    
-.divide_by_zero:
-    ; Set result to -1 and raise exception
-    mov ecx, ebx
-    shr ecx, 21
-    and ecx, 0x1F
-    test ecx, ecx
-    jz .raise_exception
-    mov qword [r13 + VM_GPRS + rcx * 8], -1
-    
-.raise_exception:
-    mov edi, 8  ; Division by zero exception
-    call raise_exception
-    
-.done:
-    pop rdx
-    pop rbp
-    ret
-
-; MOD - Modulo
-global execute_mod
-execute_mod:
-    push rbp
-    mov rbp, rsp
-    push rdx
-    
-    ; Extract operands (same as DIV)
-    mov eax, ebx
-    shr eax, 21
-    and eax, 0x1F  ; rd
-    
-    mov ecx, ebx
-    shr ecx, 16
-    and ecx, 0x1F  ; rs1
-    
-    mov edx, ebx
-    shr edx, 11
-    and edx, 0x1F  ; rs2
-    
-    ; Load divisor and check for zero
-    mov r9, [r13 + VM_GPRS + rdx * 8]
-    test r9, r9
-    jz .divide_by_zero
-    
-    ; Load dividend
-    mov rax, [r13 + VM_GPRS + rcx * 8]
-    xor edx, edx
-    
-    ; Perform division
-    div r9  ; Remainder in RDX
-    
-    ; Store remainder (skip if rd = 0)
-    mov ecx, ebx
-    shr ecx, 21
-    and ecx, 0x1F
-    test ecx, ecx
-    jz .done
-    mov [r13 + VM_GPRS + rcx * 8], rdx
-    jmp .done
-    
-.divide_by_zero:
-    ; Return original value
-    mov ecx, ebx
-    shr ecx, 21
-    and ecx, 0x1F
-    test ecx, ecx
-    jz .done
-    mov edx, ebx
-    shr edx, 16
-    and edx, 0x1F
-    mov rax, [r13 + VM_GPRS + rdx * 8]
-    mov [r13 + VM_GPRS + rcx * 8], rax
-    
-.done:
-    pop rdx
-    pop rbp
-    ret
-
-; LD - Load 64-bit
-global execute_ld
-execute_ld:
-    push rbp
-    mov rbp, rsp
-    push rbx
-    push rcx
-    
-    ; Extract operands
-    mov eax, ebx
-    shr eax, 21
-    and eax, 0x1F  ; rd
-    
-    mov ecx, ebx
-    shr ecx, 16
-    and ecx, 0x1F  ; rs1
-    
-    ; Extract immediate offset (16-bit signed)
-    movsx rdx, bx  ; Sign extend lower 16 bits
-    
-    ; Calculate effective address
-    mov rdi, [r13 + VM_GPRS + rcx * 8]
-    add rdi, rdx
-    
-    ; Read from memory
-    call memory_read  ; Returns value in RAX
-    
-    ; Store to register (skip if rd = 0)
-    mov ecx, ebx
-    shr ecx, 21
-    and ecx, 0x1F
-    test ecx, ecx
-    jz .done
-    mov [r13 + VM_GPRS + rcx * 8], rax
-    
-    ; Update memory operation counter
-    inc qword [r13 + VM_PERF + PERF_MEM_OPS * 8]
-    
-.done:
-    pop rcx
-    pop rbx
-    pop rbp
-    ret
-
-; LW - Load 32-bit (sign extend)
-global execute_lw
-execute_lw:
-    push rbp
-    mov rbp, rsp
-    push rbx
-    push rcx
-    
-    ; Extract operands
-    mov eax, ebx
-    shr eax, 21
-    and eax, 0x1F  ; rd
-    
-    mov ecx, ebx
-    shr ecx, 16
-    and ecx, 0x1F  ; rs1
-    
-    ; Extract immediate offset
-    movsx rdx, bx
-    
-    ; Calculate effective address
-    mov rdi, [r13 + VM_GPRS + rcx * 8]
-    add rdi, rdx
-    
-    ; Read from memory
-    call memory_read
-    
-    ; Sign extend 32-bit to 64-bit
-    movsx rax, eax
-    
-    ; Store to register
-    mov ecx, ebx
-    shr ecx, 21
-    and ecx, 0x1F
-    test ecx, ecx
-    jz .done
-    mov [r13 + VM_GPRS + rcx * 8], rax
-    
-    inc qword [r13 + VM_PERF + PERF_MEM_OPS * 8]
-    
-.done:
-    pop rcx
-    pop rbx
-    pop rbp
-    ret
-
-; ST - Store 64-bit
-global execute_st
-execute_st:
-    push rbp
-    mov rbp, rsp
-    push rbx
-    push rcx
-    
-    ; Extract operands
-    mov ecx, ebx
-    shr ecx, 16
-    and ecx, 0x1F  ; rs1 (base address)
-    
-    mov edx, ebx
-    shr edx, 11
-    and edx, 0x1F  ; rs2 (value to store)
-    
-    ; Extract immediate offset
-    movsx rax, bx
-    
-    ; Calculate effective address
-    mov rdi, [r13 + VM_GPRS + rcx * 8]
-    add rdi, rax
-    
-    ; Get value to store
-    mov rsi, [r13 + VM_GPRS + rdx * 8]
-    
-    ; Write to memory
-    call memory_write
-    
-    ; Update memory operation counter
-    inc qword [r13 + VM_PERF + PERF_MEM_OPS * 8]
-    
-    pop rcx
-    pop rbx
-    pop rbp
-    ret
-
-; BEQ - Branch if equal
-global execute_beq
-execute_beq:
-    push rbp
-    mov rbp, rsp
-    
-    ; Extract operands
-    mov ecx, ebx
-    shr ecx, 21
-    and ecx, 0x1F  ; rs1
-    
-    mov edx, ebx
-    shr edx, 16
-    and edx, 0x1F  ; rs2
-    
-    ; Load values
-    mov r8, [r13 + VM_GPRS + rcx * 8]
-    mov r9, [r13 + VM_GPRS + rdx * 8]
-    
-    ; Compare
-    cmp r8, r9
-    jne .no_branch
-    
-    ; Extract offset (13-bit signed, shifted left by 1)
-    mov eax, ebx
-    shl eax, 19  ; Shift to get sign bit in position
-    sar eax, 18  ; Sign extend and shift back (keeping 1-bit shift)
-    movsx rax, eax
-    
-    ; Update PC
-    add [r13 + VM_PC], rax
-    sub qword [r13 + VM_PC], 4  ; Compensate for PC increment
-    
-    ; Update branch prediction counter
-    inc qword [r13 + VM_PERF + PERF_BRANCH_MISS * 8]
-    
-.no_branch:
-    pop rbp
-    ret
-
-; BNE - Branch if not equal
-global execute_bne
-execute_bne:
-    push rbp
-    mov rbp, rsp
-    
-    ; Extract operands
-    mov ecx, ebx
-    shr ecx, 21
-    and ecx, 0x1F  ; rs1
-    
-    mov edx, ebx
-    shr edx, 16
-    and edx, 0x1F  ; rs2
-    
-    ; Load values
-    mov r8, [r13 + VM_GPRS + rcx * 8]
-    mov r9, [r13 + VM_GPRS + rdx * 8]
-    
-    ; Compare
-    cmp r8, r9
-    je .no_branch
-    
-    ; Extract offset
-    mov eax, ebx
-    shl eax, 19
-    sar eax, 18
-    movsx rax, eax
-    
-    ; Update PC
-    add [r13 + VM_PC], rax
-    sub qword [r13 + VM_PC], 4
-    
-    inc qword [r13 + VM_PERF + PERF_BRANCH_MISS * 8]
-    
-.no_branch:
-    pop rbp
-    ret
-
-; BLT - Branch if less than
-global execute_blt
-execute_blt:
-    push rbp
-    mov rbp, rsp
-    
-    ; Extract operands
-    mov ecx, ebx
-    shr ecx, 21
-    and ecx, 0x1F  ; rs1
-    
-    mov edx, ebx
-    shr edx, 16
-    and edx, 0x1F  ; rs2
-    
-    ; Load values
-    mov r8, [r13 + VM_GPRS + rcx * 8]
-    mov r9, [r13 + VM_GPRS + rdx * 8]
-    
-    ; Signed compare
-    cmp r8, r9
-    jge .no_branch
-    
-    ; Extract offset
-    mov eax, ebx
-    shl eax, 19
-    sar eax, 18
-    movsx rax, eax
-    
-    ; Update PC
-    add [r13 + VM_PC], rax
-    sub qword [r13 + VM_PC], 4
-    
-    inc qword [r13 + VM_PERF + PERF_BRANCH_MISS * 8]
-    
-.no_branch:
-    pop rbp
-    ret
-
-; JMP - Jump and link
-global execute_jmp
-execute_jmp:
-    push rbp
-    mov rbp, rsp
-    
-    ; Extract operands
-    mov eax, ebx
-    shr eax, 21
-    and eax, 0x1F  ; rd (link register)
-    
-    mov ecx, ebx
-    shr ecx, 16
-    and ecx, 0x1F  ; rs1 (base)
-    
-    ; Extract immediate offset
-    movsx rdx, bx
-    
-    ; Calculate target address
-    mov r8, [r13 + VM_GPRS + rcx * 8]
-    add r8, rdx
-    
-    ; Save return address if rd != 0
-    test eax, eax
-    jz .no_link
-    mov r9, [r13 + VM_PC]
-    mov [r13 + VM_GPRS + rax * 8], r9
-    
-.no_link:
-    ; Jump to target
-    mov [r13 + VM_PC], r8
-    
-    pop rbp
-    ret
-
-; CALL - Function call
-global execute_call
-execute_call:
-    push rbp
-    mov rbp, rsp
-    
-    ; Extract 26-bit offset
-    mov eax, ebx
-    and eax, 0x3FFFFFF
-    shl eax, 6  ; Sign bit in position
-    sar eax, 4  ; Sign extend and scale by 4
-    movsx rax, eax
-    
-    ; Save return address in R31
-    mov rdx, [r13 + VM_PC]
-    mov [r13 + VM_GPRS + 31 * 8], rdx
-    
-    ; Update PC
-    add [r13 + VM_PC], rax
-    sub qword [r13 + VM_PC], 4
-    
-    pop rbp
-    ret
-
-; RET - Return
-global execute_ret
-execute_ret:
-    ; Simple implementation: JMP to R31
-    mov rax, [r13 + VM_GPRS + 31 * 8]
-    mov [r13 + VM_PC], rax
-    ret
-
-; SYSCALL - System call
-global execute_syscall
-execute_syscall:
-    push rbp
-    mov rbp, rsp
-    
-    ; Extract immediate
-    movzx edi, bx
-    
-    ; System call number in R0
-    mov rax, [r13 + VM_GPRS + 0 * 8]
-    
-    ; Handle basic system calls
-    cmp rax, 1  ; SYS_WRITE
-    je .sys_write
-    cmp rax, 60 ; SYS_EXIT
-    je .sys_exit
-    
-    ; Unknown syscall
-    mov edi, 11  ; ENOSYS
-    call raise_exception
-    jmp .done
-    
-.sys_write:
-    ; fd in R1, buffer in R2, count in R3
-    ; For now, just simulate success
-    mov rax, [r13 + VM_GPRS + 3 * 8]  ; Return count
-    mov [r13 + VM_GPRS + 0 * 8], rax
-    jmp .done
-    
-.sys_exit:
-    ; Exit code in R1
-    or byte [r13 + VM_FLAGS], (1 << FLAG_HALTED)
-    
-.done:
-    pop rbp
-    ret
-
-; HALT - Halt processor
-global execute_halt
-execute_halt:
-    or byte [r13 + VM_FLAGS], (1 << FLAG_HALTED)
-    ret
-
-; NOP - No operation
-global execute_nop
-execute_nop:
-    ret
-
-; Remaining stub instructions
-global execute_and
-global execute_or
-global execute_xor
-global execute_not
-global execute_shl
-global execute_shr
-global execute_sar
-global execute_rol
-global execute_ror
-global execute_lh
-global execute_lb
-global execute_sw
-global execute_sh
-global execute_sb
-global execute_bge
-global execute_bltu
-global execute_bgeu
-global execute_cpuid
-global execute_rdcycle
-global execute_rdperf
-global execute_prefetch
-global execute_clflush
-global execute_fence
-global execute_lr
-global execute_sc
-global execute_amoswap
-global execute_amoadd
-global execute_amoand
-global execute_amoor
-global execute_amoxor
-global execute_vadd_f64
-global execute_vsub_f64
-global execute_vmul_f64
-global execute_vfma_f64
-global execute_vload
-global execute_vstore
-global execute_vbroadcast
-global execute_illegal
-
-; These remain as stubs for now
-execute_and:
-execute_or:
-execute_xor:
-execute_not:
-execute_shl:
-execute_shr:
-execute_sar:
-execute_rol:
-execute_ror:
-execute_lh:
-execute_lb:
-execute_sw:
-execute_sh:
-execute_sb:
-execute_bge:
-execute_bltu:
-execute_bgeu:
-execute_cpuid:
-execute_rdcycle:
-execute_rdperf:
-execute_prefetch:
-execute_clflush:
-execute_fence:
-execute_lr:
-execute_sc:
-execute_amoswap:
-execute_amoadd:
-execute_amoand:
-execute_amoor:
-execute_amoxor:
-execute_vsub_f64:
-execute_vmul_f64:
-execute_vfma_f64:
-execute_vload:
-execute_vstore:
-execute_vbroadcast:
-execute_illegal:
-    ret
+extern interrupt_trigger
 
 ; Constants
 %define VM_PC 0
-%define VM_SP 8
 %define VM_FLAGS 16
 %define VM_GPRS 24
 %define VM_VREGS (VM_GPRS + 32 * 8)
 %define VM_PERF (VM_VREGS + 16 * 32)
 
-%define FLAG_ZERO 0
-%define FLAG_CARRY 1
-%define FLAG_OVERFLOW 2
-%define FLAG_NEGATIVE 3
-%define FLAG_IE 4
-%define FLAG_UM 5
-%define FLAG_HALTED 7
+; Instruction opcodes
+%define OP_ADD 0x00
+%define OP_SUB 0x01
+%define OP_MUL 0x02
+%define OP_DIV 0x03
+%define OP_AND 0x04
+%define OP_OR 0x05
+%define OP_XOR 0x06
+%define OP_NOT 0x07
+%define OP_SHL 0x08
+%define OP_SHR 0x09
+%define OP_SAR 0x0A
+%define OP_ROL 0x0B
+%define OP_ROR 0x0C
+%define OP_CMP 0x0D
+%define OP_TEST 0x0E
+%define OP_LD 0x0F
+%define OP_ST 0x10
+%define OP_BEQ 0x11
+%define OP_BNE 0x12
+%define OP_BLT 0x13
+%define OP_BGE 0x14
+%define OP_JMP 0x15
+%define OP_CALL 0x16
+%define OP_RET 0x17
+%define OP_SYSCALL 0x18
+%define OP_HALT 0x19
+%define OP_NOP 0x1A
 
-%define PERF_INST_COUNT 0
-%define PERF_CYCLE_COUNT 1
-%define PERF_L1_MISS 2
-%define PERF_L2_MISS 3
-%define PERF_BRANCH_MISS 4
-%define PERF_PIPELINE_STALL 5
-%define PERF_MEM_OPS 6
-%define PERF_SIMD_OPS 7
+; Global symbols
+global decode_instruction
+global execute_instruction
+global get_register_value
+global set_register_value
+global get_flags
+global set_flags
+
+SECTION .text
+
+; Decode instruction
+; Input: RDI = instruction word
+; Output: RAX = opcode, RCX = rd, RDX = rs1, R8 = rs2, R9 = immediate
+global decode_instruction
+decode_instruction:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    
+    mov rbx, rdi  ; Instruction word
+    
+    ; Extract opcode (bits 31-26)
+    mov rax, rbx
+    shr rax, 26
+    and rax, 0x3F
+    
+    ; Extract rd (bits 25-21)
+    mov rcx, rbx
+    shr rcx, 21
+    and rcx, 0x1F
+    
+    ; Extract rs1 (bits 20-16)
+    mov rdx, rbx
+    shr rdx, 16
+    and rdx, 0x1F
+    
+    ; Extract rs2 (bits 15-11)
+    mov r8, rbx
+    shr r8, 11
+    and r8, 0x1F
+    
+    ; Extract immediate (bits 15-0)
+    mov r9, rbx
+    and r9, 0xFFFF
+    ; Sign extend
+    movsx r9, r9w
+    
+    pop rbx
+    pop rbp
+    ret
+
+; Execute instruction
+; Input: RDI = opcode, RSI = rd, RDX = rs1, RCX = rs2, R8 = immediate
+; Output: RAX = 0 on success, error code otherwise
+global execute_instruction
+execute_instruction:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    
+    mov r12, rdi  ; Opcode
+    mov r13, rsi  ; rd
+    mov r14, rdx  ; rs1
+    mov r15, rcx  ; rs2
+    mov rbx, r8   ; immediate
+    
+    ; Get register values
+    mov rdi, r14
+    call get_register_value
+    mov r14, rax  ; rs1 value
+    
+    mov rdi, r15
+    call get_register_value
+    mov r15, rax  ; rs2 value
+    
+    ; Execute based on opcode
+    cmp r12, OP_ADD
+    je .add
+    cmp r12, OP_SUB
+    je .sub
+    cmp r12, OP_MUL
+    je .mul
+    cmp r12, OP_DIV
+    je .div
+    cmp r12, OP_AND
+    je .and
+    cmp r12, OP_OR
+    je .or
+    cmp r12, OP_XOR
+    je .xor
+    cmp r12, OP_NOT
+    je .not
+    cmp r12, OP_SHL
+    je .shl
+    cmp r12, OP_SHR
+    je .shr
+    cmp r12, OP_SAR
+    je .sar
+    cmp r12, OP_ROL
+    je .rol
+    cmp r12, OP_ROR
+    je .ror
+    cmp r12, OP_CMP
+    je .cmp
+    cmp r12, OP_TEST
+    je .test
+    cmp r12, OP_LD
+    je .ld
+    cmp r12, OP_ST
+    je .st
+    cmp r12, OP_BEQ
+    je .beq
+    cmp r12, OP_BNE
+    je .bne
+    cmp r12, OP_BLT
+    je .blt
+    cmp r12, OP_BGE
+    je .bge
+    cmp r12, OP_JMP
+    je .jmp
+    cmp r12, OP_CALL
+    je .call
+    cmp r12, OP_RET
+    je .ret
+    cmp r12, OP_SYSCALL
+    je .syscall
+    cmp r12, OP_HALT
+    je .halt
+    cmp r12, OP_NOP
+    je .nop
+    
+    ; Unknown opcode
+    mov rax, -1
+    jmp .done
+    
+.add:
+    mov rdi, r14
+    mov rsi, r15
+    call alu_add
+    mov rdi, r13
+    mov rsi, rax
+    call set_register_value
+    jmp .success
+    
+.sub:
+    mov rdi, r14
+    mov rsi, r15
+    call alu_sub
+    mov rdi, r13
+    mov rsi, rax
+    call set_register_value
+    jmp .success
+    
+.mul:
+    mov rdi, r14
+    mov rsi, r15
+    call alu_mul
+    mov rdi, r13
+    mov rsi, rax
+    call set_register_value
+    jmp .success
+    
+.div:
+    mov rdi, r14
+    mov rsi, r15
+    call alu_div
+    mov rdi, r13
+    mov rsi, rax
+    call set_register_value
+    jmp .success
+    
+.and:
+    mov rdi, r14
+    mov rsi, r15
+    call alu_and
+    mov rdi, r13
+    mov rsi, rax
+    call set_register_value
+    jmp .success
+    
+.or:
+    mov rdi, r14
+    mov rsi, r15
+    call alu_or
+    mov rdi, r13
+    mov rsi, rax
+    call set_register_value
+    jmp .success
+    
+.xor:
+    mov rdi, r14
+    mov rsi, r15
+    call alu_xor
+    mov rdi, r13
+    mov rsi, rax
+    call set_register_value
+    jmp .success
+    
+.not:
+    mov rdi, r14
+    call alu_not
+    mov rdi, r13
+    mov rsi, rax
+    call set_register_value
+    jmp .success
+    
+.shl:
+    mov rdi, r14
+    mov rsi, r15
+    call alu_shl
+    mov rdi, r13
+    mov rsi, rax
+    call set_register_value
+    jmp .success
+    
+.shr:
+    mov rdi, r14
+    mov rsi, r15
+    call alu_shr
+    mov rdi, r13
+    mov rsi, rax
+    call set_register_value
+    jmp .success
+    
+.sar:
+    mov rdi, r14
+    mov rsi, r15
+    call alu_sar
+    mov rdi, r13
+    mov rsi, rax
+    call set_register_value
+    jmp .success
+    
+.rol:
+    mov rdi, r14
+    mov rsi, r15
+    call alu_rol
+    mov rdi, r13
+    mov rsi, rax
+    call set_register_value
+    jmp .success
+    
+.ror:
+    mov rdi, r14
+    mov rsi, r15
+    call alu_ror
+    mov rdi, r13
+    mov rsi, rax
+    call set_register_value
+    jmp .success
+    
+.cmp:
+    mov rdi, r14
+    mov rsi, r15
+    call alu_cmp
+    jmp .success
+    
+.test:
+    mov rdi, r14
+    mov rsi, r15
+    call alu_test
+    jmp .success
+    
+.ld:
+    ; Load from memory
+    mov rdi, r14  ; Address
+    lea rsi, [rsp - 8]  ; Buffer
+    mov rdx, 8  ; Size
+    call memory_read
+    test rax, rax
+    jnz .error
+    
+    mov rax, [rsp - 8]
+    mov rdi, r13
+    mov rsi, rax
+    call set_register_value
+    jmp .success
+    
+.st:
+    ; Store to memory
+    mov rdi, r14  ; Address
+    lea rsi, [r15]  ; Data
+    mov rdx, 8  ; Size
+    call memory_write
+    test rax, rax
+    jnz .error
+    jmp .success
+    
+.beq:
+    ; Branch if equal
+    call get_flags
+    test al, 1  ; Zero flag
+    jz .success
+    ; Update PC
+    lea rbx, [vm_state]
+    add qword [rbx + VM_PC], rbx
+    jmp .success
+    
+.bne:
+    ; Branch if not equal
+    call get_flags
+    test al, 1  ; Zero flag
+    jnz .success
+    ; Update PC
+    lea rbx, [vm_state]
+    add qword [rbx + VM_PC], rbx
+    jmp .success
+    
+.blt:
+    ; Branch if less than
+    call get_flags
+    test al, 8  ; Negative flag
+    jz .success
+    ; Update PC
+    lea rbx, [vm_state]
+    add qword [rbx + VM_PC], rbx
+    jmp .success
+    
+.bge:
+    ; Branch if greater or equal
+    call get_flags
+    test al, 8  ; Negative flag
+    jnz .success
+    ; Update PC
+    lea rbx, [vm_state]
+    add qword [rbx + VM_PC], rbx
+    jmp .success
+    
+.jmp:
+    ; Jump
+    lea rbx, [vm_state]
+    mov [rbx + VM_PC], r14
+    jmp .success
+    
+.call:
+    ; Call function
+    lea rbx, [vm_state]
+    mov rax, [rbx + VM_PC]
+    add rax, 4
+    mov rdi, 31  ; Link register
+    mov rsi, rax
+    call set_register_value
+    mov [rbx + VM_PC], r14
+    jmp .success
+    
+.ret:
+    ; Return
+    mov rdi, 31  ; Link register
+    call get_register_value
+    lea rbx, [vm_state]
+    mov [rbx + VM_PC], rax
+    jmp .success
+    
+.syscall:
+    ; System call
+    mov rdi, 0x80  ; System call interrupt
+    call interrupt_trigger
+    jmp .success
+    
+.halt:
+    ; Halt VM
+    lea rbx, [vm_state]
+    or byte [rbx + VM_FLAGS], 0x80
+    jmp .success
+    
+.nop:
+    ; No operation
+    jmp .success
+    
+.success:
+    xor eax, eax
+    jmp .done
+    
+.error:
+    mov eax, -1
+    
+.done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+
+; Get register value
+; Input: RDI = register number
+; Output: RAX = register value
+global get_register_value
+get_register_value:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    
+    ; Check if R0 (always zero)
+    test rdi, rdi
+    jz .zero
+    
+    ; Get register value
+    lea rbx, [vm_state]
+    mov rax, [rbx + VM_GPRS + rdi * 8]
+    jmp .done
+    
+.zero:
+    xor eax, eax
+    
+.done:
+    pop rbx
+    pop rbp
+    ret
+
+; Set register value
+; Input: RDI = register number, RSI = value
+global set_register_value
+set_register_value:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    
+    ; Check if R0 (cannot be written)
+    test rdi, rdi
+    jz .done
+    
+    ; Set register value
+    lea rbx, [vm_state]
+    mov [rbx + VM_GPRS + rdi * 8], rsi
+    
+.done:
+    pop rbx
+    pop rbp
+    ret
+
+; Get flags
+; Output: AL = flags
+global get_flags
+get_flags:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    
+    lea rbx, [vm_state]
+    mov al, [rbx + VM_FLAGS]
+    
+    pop rbx
+    pop rbp
+    ret
+
+; Set flags
+; Input: AL = flags
+global set_flags
+set_flags:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    
+    lea rbx, [vm_state]
+    mov [rbx + VM_FLAGS], al
+    
+    pop rbx
+    pop rbp
+    ret

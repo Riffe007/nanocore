@@ -1,1242 +1,717 @@
-; NanoCore Cache Subsystem
-; Implements L1I/L1D and L2 unified cache with LRU replacement
-;
-; Features:
-; - 32KB L1 instruction cache (4-way set associative)
-; - 32KB L1 data cache (4-way set associative)  
-; - 256KB L2 unified cache (8-way set associative)
-; - Write-back policy with dirty tracking
-; - Hardware prefetching
-; - Cache coherency support
+; NanoCore Cache Module
+; Handles L1 instruction cache, L1 data cache, and L2 unified cache
 
 BITS 64
 SECTION .text
-
-; Constants
-%define L1_SIZE 32768           ; 32KB
-%define L1_LINE_SIZE 64         ; 64 byte cache lines
-%define L1_WAYS 4               ; 4-way set associative
-%define L1_SETS (L1_SIZE / (L1_LINE_SIZE * L1_WAYS))
-
-%define L2_SIZE 262144          ; 256KB
-%define L2_LINE_SIZE 64         ; 64 byte cache lines
-%define L2_WAYS 8               ; 8-way set associative
-%define L2_SETS (L2_SIZE / (L2_LINE_SIZE * L2_WAYS))
-
-; Cache line states
-%define CACHE_INVALID 0
-%define CACHE_VALID 1
-%define CACHE_DIRTY 2
-%define CACHE_SHARED 4
-%define CACHE_EXCLUSIVE 8
-
-; Global symbols
-global cache_init
-global cache_lookup
-global cache_update
-global cache_flush
-global cache_invalidate
-global l1i_lookup
-global l1i_insert
-global l1d_lookup
-global l1d_insert
-global l2_lookup
-global l2_insert
-global prefetch_enable
-global prefetch_disable
 
 ; External symbols
 extern memory_read
 extern memory_write
 
+; Constants
+%define CACHE_LINE_SIZE 64
+%define CACHE_LINE_SHIFT 6
+%define CACHE_LINE_MASK 0x3F
+
+; L1 Cache parameters
+%define L1I_SIZE 32768      ; 32KB
+%define L1I_WAYS 4
+%define L1I_SETS (L1I_SIZE / (CACHE_LINE_SIZE * L1I_WAYS))
+%define L1I_SET_SHIFT 8     ; 256 sets
+
+%define L1D_SIZE 32768      ; 32KB
+%define L1D_WAYS 8
+%define L1D_SETS (L1D_SIZE / (CACHE_LINE_SIZE * L1D_WAYS))
+%define L1D_SET_SHIFT 7     ; 128 sets
+
+; L2 Cache parameters
+%define L2_SIZE 262144      ; 256KB
+%define L2_WAYS 16
+%define L2_SETS (L2_SIZE / (CACHE_LINE_SIZE * L2_WAYS))
+%define L2_SET_SHIFT 8      ; 256 sets
+
+; Cache line structure
+struc cache_line
+    .tag: resq 1            ; Address tag
+    .data: resb CACHE_LINE_SIZE  ; Cache line data
+    .lru: resb 1            ; LRU counter
+    .valid: resb 1          ; Valid bit
+    .dirty: resb 1          ; Dirty bit
+    .reserved: resb 4       ; Alignment
+endstruc
+
+; Cache structure
+struc cache_state
+    .lines: resb cache_line_size * L1I_SETS * L1I_WAYS  ; L1I cache lines
+    .l1d_lines: resb cache_line_size * L1D_SETS * L1D_WAYS  ; L1D cache lines
+    .l2_lines: resb cache_line_size * L2_SETS * L2_WAYS  ; L2 cache lines
+    .stats: resq 8          ; Cache statistics
+endstruc
+
+; Global symbols
+global cache_init
+global cache_lookup
+global cache_update
+global cache_invalidate
+global cache_flush
+global cache_get_stats
+
 SECTION .bss
 align 64
-; L1 Instruction Cache
-l1i_tags: resq L1_SETS * L1_WAYS       ; Tag array
-l1i_state: resb L1_SETS * L1_WAYS      ; State array
-l1i_lru: resb L1_SETS * L1_WAYS        ; LRU counters
-l1i_data: resb L1_SIZE                 ; Data array
+cache_state: resb cache_state_size
 
-; L1 Data Cache
-l1d_tags: resq L1_SETS * L1_WAYS
-l1d_state: resb L1_SETS * L1_WAYS
-l1d_lru: resb L1_SETS * L1_WAYS
-l1d_data: resb L1_SIZE
-
-; L2 Unified Cache
-l2_tags: resq L2_SETS * L2_WAYS
-l2_state: resb L2_SETS * L2_WAYS
-l2_lru: resb L2_SETS * L2_WAYS
-l2_data: resb L2_SIZE
-
-; Statistics
-cache_hits: resq 4      ; L1I, L1D, L2, Prefetch
-cache_misses: resq 4
-cache_evictions: resq 4
-cache_writebacks: resq 4
-
-; Prefetcher state
-prefetch_enabled: resb 1
-prefetch_stride: resq 1
-prefetch_last_addr: resq 1
-prefetch_confidence: resb 1
+SECTION .data
+align 64
+; Cache statistics indices
+%define STAT_L1I_HITS 0
+%define STAT_L1I_MISSES 1
+%define STAT_L1D_HITS 2
+%define STAT_L1D_MISSES 3
+%define STAT_L2_HITS 4
+%define STAT_L2_MISSES 5
+%define STAT_WRITEBACKS 6
+%define STAT_INVALIDATES 7
 
 SECTION .text
 
 ; Initialize cache subsystem
-; Output: RAX = 0 on success
+global cache_init
 cache_init:
     push rbp
     mov rbp, rsp
-    push rdi
-    push rcx
+    push rbx
+    push r12
     
-    ; Clear L1I cache
-    lea rdi, [l1i_tags]
+    ; Clear cache state
+    lea rdi, [cache_state]
     xor eax, eax
-    mov ecx, (L1_SETS * L1_WAYS * 9 + L1_SIZE) / 8
+    mov ecx, cache_state_size / 8
     rep stosq
     
-    ; Clear L1D cache
-    lea rdi, [l1d_tags]
-    mov ecx, (L1_SETS * L1_WAYS * 9 + L1_SIZE) / 8
-    rep stosq
+    ; Initialize LRU counters
+    lea rbx, [cache_state + cache_state.lines]
+    mov r12, 0  ; Way counter
     
-    ; Clear L2 cache
-    lea rdi, [l2_tags]
-    mov ecx, (L2_SETS * L2_WAYS * 9 + L2_SIZE) / 8
-    rep stosq
+.init_l1i_lru:
+    cmp r12, L1I_WAYS
+    jae .init_l1d
     
-    ; Clear statistics
-    lea rdi, [cache_hits]
-    mov ecx, 16
-    rep stosq
+    mov ecx, L1I_SETS
+    lea rdi, [rbx + r12 * cache_line_size]
     
-    ; Enable prefetcher
-    mov byte [prefetch_enabled], 1
-    mov qword [prefetch_stride], 0
-    mov qword [prefetch_last_addr], 0
-    mov byte [prefetch_confidence], 0
+.init_l1i_set:
+    mov byte [rdi + cache_line.lru], 0
+    mov byte [rdi + cache_line.valid], 0
+    mov byte [rdi + cache_line.dirty], 0
+    add rdi, L1I_WAYS * cache_line_size
+    loop .init_l1i_set
     
+    inc r12
+    jmp .init_l1i_lru
+    
+.init_l1d:
+    lea rbx, [cache_state + cache_state.l1d_lines]
+    mov r12, 0
+    
+.init_l1d_lru:
+    cmp r12, L1D_WAYS
+    jae .init_l2
+    
+    mov ecx, L1D_SETS
+    lea rdi, [rbx + r12 * cache_line_size]
+    
+.init_l1d_set:
+    mov byte [rdi + cache_line.lru], 0
+    mov byte [rdi + cache_line.valid], 0
+    mov byte [rdi + cache_line.dirty], 0
+    add rdi, L1D_WAYS * cache_line_size
+    loop .init_l1d_set
+    
+    inc r12
+    jmp .init_l1d_lru
+    
+.init_l2:
+    lea rbx, [cache_state + cache_state.l2_lines]
+    mov r12, 0
+    
+.init_l2_lru:
+    cmp r12, L2_WAYS
+    jae .done
+    
+    mov ecx, L2_SETS
+    lea rdi, [rbx + r12 * cache_line_size]
+    
+.init_l2_set:
+    mov byte [rdi + cache_line.lru], 0
+    mov byte [rdi + cache_line.valid], 0
+    mov byte [rdi + cache_line.dirty], 0
+    add rdi, L2_WAYS * cache_line_size
+    loop .init_l2_set
+    
+    inc r12
+    jmp .init_l2_lru
+    
+.done:
     xor eax, eax
-    
-    pop rcx
-    pop rdi
+    pop r12
+    pop rbx
     pop rbp
     ret
 
-; Generic cache lookup
+; Look up address in cache
 ; Input: RDI = address, RSI = cache type (0=L1I, 1=L1D, 2=L2)
-; Output: RAX = data if hit, 0 if miss, RCX = hit flag
+; Output: RAX = pointer to cache line (0 if miss)
 cache_lookup:
     push rbp
     mov rbp, rsp
-    
-    cmp rsi, 0
-    je l1i_lookup
-    cmp rsi, 1
-    je l1d_lookup
-    cmp rsi, 2
-    je l2_lookup
-    
-    ; Invalid cache type
-    xor eax, eax
-    xor ecx, ecx
-    
-    pop rbp
-    ret
-
-; L1 Instruction Cache lookup
-; Input: RDI = address
-; Output: RAX = data if hit, 0 if miss, RCX = hit flag
-l1i_lookup:
-    push rbp
-    mov rbp, rsp
     push rbx
-    push rdx
-    push rsi
-    push r8
-    push r9
+    push r12
+    push r13
+    push r14
     
-    ; Calculate set index
-    mov rax, rdi
-    shr rax, 6              ; Divide by line size
-    and rax, (L1_SETS - 1)  ; Modulo number of sets
-    mov r8, rax             ; Save set index
+    mov r12, rdi  ; Address
+    mov r13, rsi  ; Cache type
     
-    ; Calculate tag
-    mov r9, rdi
-    shr r9, 6 + 7           ; Remove offset and index bits
+    ; Calculate set index and tag
+    mov rax, r12
+    shr rax, CACHE_LINE_SHIFT
     
-    ; Search all ways in the set
-    xor ecx, ecx            ; Way counter
-.search_ways:
-    ; Calculate index into arrays
-    mov rax, r8
-    shl rax, 2              ; Multiply by L1_WAYS
-    add rax, rcx
+    ; Select cache based on type
+    cmp r13, 0
+    je .l1i_lookup
+    cmp r13, 1
+    je .l1d_lookup
+    cmp r13, 2
+    je .l2_lookup
+    jmp .miss
     
-    ; Check if valid
-    movzx edx, byte [l1i_state + rax]
-    test dl, CACHE_VALID
-    jz .next_way
+.l1i_lookup:
+    ; L1I cache lookup
+    and rax, (L1I_SETS - 1)  ; Set index
+    mov rbx, rax
+    shl rbx, L1I_WAYS
+    shl rbx, CACHE_LINE_SHIFT  ; Set offset
+    lea rbx, [cache_state + cache_state.lines + rbx]
     
-    ; Check tag match
-    mov rbx, [l1i_tags + rax * 8]
-    cmp rbx, r9
-    jne .next_way
+    mov rcx, L1I_WAYS
+    mov r14, 0  ; Way counter
     
-    ; Cache hit!
-    inc qword [cache_hits]
+.search_l1i:
+    lea rdi, [rbx + r14 * cache_line_size]
+    cmp byte [rdi + cache_line.valid], 0
+    je .next_l1i_way
     
+    mov rax, r12
+    shr rax, CACHE_LINE_SHIFT
+    shr rax, L1I_SET_SHIFT
+    cmp [rdi + cache_line.tag], rax
+    je .hit
+    
+.next_l1i_way:
+    inc r14
+    loop .search_l1i
+    jmp .miss
+    
+.l1d_lookup:
+    ; L1D cache lookup
+    and rax, (L1D_SETS - 1)  ; Set index
+    mov rbx, rax
+    shl rbx, L1D_WAYS
+    shl rbx, CACHE_LINE_SHIFT  ; Set offset
+    lea rbx, [cache_state + cache_state.l1d_lines + rbx]
+    
+    mov rcx, L1D_WAYS
+    mov r14, 0  ; Way counter
+    
+.search_l1d:
+    lea rdi, [rbx + r14 * cache_line_size]
+    cmp byte [rdi + cache_line.valid], 0
+    je .next_l1d_way
+    
+    mov rax, r12
+    shr rax, CACHE_LINE_SHIFT
+    shr rax, L1D_SET_SHIFT
+    cmp [rdi + cache_line.tag], rax
+    je .hit
+    
+.next_l1d_way:
+    inc r14
+    loop .search_l1d
+    jmp .miss
+    
+.l2_lookup:
+    ; L2 cache lookup
+    and rax, (L2_SETS - 1)  ; Set index
+    mov rbx, rax
+    shl rbx, L2_WAYS
+    shl rbx, CACHE_LINE_SHIFT  ; Set offset
+    lea rbx, [cache_state + cache_state.l2_lines + rbx]
+    
+    mov rcx, L2_WAYS
+    mov r14, 0  ; Way counter
+    
+.search_l2:
+    lea rdi, [rbx + r14 * cache_line_size]
+    cmp byte [rdi + cache_line.valid], 0
+    je .next_l2_way
+    
+    mov rax, r12
+    shr rax, CACHE_LINE_SHIFT
+    shr rax, L2_SET_SHIFT
+    cmp [rdi + cache_line.tag], rax
+    je .hit
+    
+.next_l2_way:
+    inc r14
+    loop .search_l2
+    jmp .miss
+    
+.hit:
     ; Update LRU
-    mov byte [l1i_lru + rax], 0
-    call update_lru_l1i
+    call update_lru
     
-    ; Calculate data offset
-    mov rdx, rdi
-    and rdx, 63             ; Offset within line
-    mov rax, r8
-    shl rax, 8              ; Set * 256 (4 ways * 64 bytes)
-    mov rbx, rcx
-    shl rbx, 6              ; Way * 64
-    add rax, rbx
-    add rax, rdx
-    
-    ; Load data
-    mov rax, [l1i_data + rax]
-    mov ecx, 1              ; Hit flag
+    ; Return cache line pointer
+    mov rax, rdi
     jmp .done
     
-.next_way:
-    inc ecx
-    cmp ecx, L1_WAYS
-    jl .search_ways
-    
-    ; Cache miss
-    inc qword [cache_misses]
+.miss:
     xor eax, eax
-    xor ecx, ecx
     
 .done:
-    pop r9
-    pop r8
-    pop rsi
-    pop rdx
-    pop rbx
-    pop rbp
-    ret
-
-; L1 Data Cache lookup
-; Input: RDI = address
-; Output: RAX = data if hit, 0 if miss, RCX = hit flag
-l1d_lookup:
-    push rbp
-    mov rbp, rsp
-    push rbx
-    push rdx
-    push rsi
-    push r8
-    push r9
-    
-    ; Calculate set index
-    mov rax, rdi
-    shr rax, 6              ; Divide by line size
-    and rax, (L1_SETS - 1)  ; Modulo number of sets
-    mov r8, rax             ; Save set index
-    
-    ; Calculate tag
-    mov r9, rdi
-    shr r9, 6 + 7           ; Remove offset and index bits
-    
-    ; Search all ways in the set
-    xor ecx, ecx            ; Way counter
-.search_ways:
-    ; Calculate index into arrays
-    mov rax, r8
-    shl rax, 2              ; Multiply by L1_WAYS
-    add rax, rcx
-    
-    ; Check if valid
-    movzx edx, byte [l1d_state + rax]
-    test dl, CACHE_VALID
-    jz .next_way
-    
-    ; Check tag match
-    mov rbx, [l1d_tags + rax * 8]
-    cmp rbx, r9
-    jne .next_way
-    
-    ; Cache hit!
-    inc qword [cache_hits + 8]
-    
-    ; Update LRU
-    mov byte [l1d_lru + rax], 0
-    call update_lru_l1d
-    
-    ; Calculate data offset
-    mov rdx, rdi
-    and rdx, 63             ; Offset within line
-    mov rax, r8
-    shl rax, 8              ; Set * 256 (4 ways * 64 bytes)
-    mov rbx, rcx
-    shl rbx, 6              ; Way * 64
-    add rax, rbx
-    add rax, rdx
-    
-    ; Load data
-    mov rax, [l1d_data + rax]
-    mov ecx, 1              ; Hit flag
-    
-    ; Trigger prefetch on hit
-    cmp byte [prefetch_enabled], 0
-    je .done
-    call update_prefetcher
-    
-    jmp .done
-    
-.next_way:
-    inc ecx
-    cmp ecx, L1_WAYS
-    jl .search_ways
-    
-    ; Cache miss
-    inc qword [cache_misses + 8]
-    xor eax, eax
-    xor ecx, ecx
-    
-.done:
-    pop r9
-    pop r8
-    pop rsi
-    pop rdx
-    pop rbx
-    pop rbp
-    ret
-
-; L2 Unified Cache lookup
-; Input: RDI = address
-; Output: RAX = data if hit, 0 if miss, RCX = hit flag
-l2_lookup:
-    push rbp
-    mov rbp, rsp
-    push rbx
-    push rdx
-    push rsi
-    push r8
-    push r9
-    
-    ; Calculate set index
-    mov rax, rdi
-    shr rax, 6              ; Divide by line size
-    and rax, (L2_SETS - 1)  ; Modulo number of sets
-    mov r8, rax             ; Save set index
-    
-    ; Calculate tag
-    mov r9, rdi
-    shr r9, 6 + 9           ; Remove offset and index bits
-    
-    ; Search all ways in the set
-    xor ecx, ecx            ; Way counter
-.search_ways:
-    ; Calculate index into arrays
-    mov rax, r8
-    shl rax, 3              ; Multiply by L2_WAYS
-    add rax, rcx
-    
-    ; Check if valid
-    movzx edx, byte [l2_state + rax]
-    test dl, CACHE_VALID
-    jz .next_way
-    
-    ; Check tag match
-    mov rbx, [l2_tags + rax * 8]
-    cmp rbx, r9
-    jne .next_way
-    
-    ; Cache hit!
-    inc qword [cache_hits + 16]
-    
-    ; Update LRU
-    mov byte [l2_lru + rax], 0
-    call update_lru_l2
-    
-    ; Calculate data offset
-    mov rdx, rdi
-    and rdx, 63             ; Offset within line
-    mov rax, r8
-    shl rax, 9              ; Set * 512 (8 ways * 64 bytes)
-    mov rbx, rcx
-    shl rbx, 6              ; Way * 64
-    add rax, rbx
-    add rax, rdx
-    
-    ; Load data
-    mov rax, [l2_data + rax]
-    mov ecx, 1              ; Hit flag
-    jmp .done
-    
-.next_way:
-    inc ecx
-    cmp ecx, L2_WAYS
-    jl .search_ways
-    
-    ; Cache miss
-    inc qword [cache_misses + 16]
-    xor eax, eax
-    xor ecx, ecx
-    
-.done:
-    pop r9
-    pop r8
-    pop rsi
-    pop rdx
-    pop rbx
-    pop rbp
-    ret
-
-; Insert line into L1I cache
-; Input: RDI = address, RSI = data pointer
-l1i_insert:
-    push rbp
-    mov rbp, rsp
-    push rbx
-    push rcx
-    push rdx
-    push r8
-    push r9
-    push r10
-    
-    ; Calculate set index
-    mov rax, rdi
-    shr rax, 6              ; Divide by line size
-    and rax, (L1_SETS - 1)  ; Modulo number of sets
-    mov r8, rax             ; Save set index
-    
-    ; Calculate tag
-    mov r9, rdi
-    shr r9, 6 + 7           ; Remove offset and index bits
-    
-    ; Find victim way (LRU)
-    call find_lru_way_l1i
-    mov r10, rax            ; Save victim way
-    
-    ; Calculate index into arrays
-    mov rax, r8
-    shl rax, 2              ; Multiply by L1_WAYS
-    add rax, r10
-    
-    ; Check if dirty and evict if needed
-    movzx edx, byte [l1i_state + rax]
-    test dl, CACHE_DIRTY
-    jz .no_writeback
-    
-    ; Writeback not applicable for I-cache
-    
-.no_writeback:
-    ; Update tag
-    mov [l1i_tags + rax * 8], r9
-    
-    ; Update state
-    mov byte [l1i_state + rax], CACHE_VALID
-    
-    ; Update LRU
-    mov byte [l1i_lru + rax], 0
-    call update_lru_l1i
-    
-    ; Copy data to cache
-    mov rdx, rdi
-    and rdx, -64            ; Align to cache line
-    
-    ; Calculate data offset
-    mov rax, r8
-    shl rax, 8              ; Set * 256
-    mov rbx, r10
-    shl rbx, 6              ; Way * 64
-    add rax, rbx
-    
-    ; Copy 64 bytes
-    lea rdi, [l1i_data + rax]
-    mov rcx, 8
-    rep movsq
-    
-    pop r10
-    pop r9
-    pop r8
-    pop rdx
-    pop rcx
-    pop rbx
-    pop rbp
-    ret
-
-; Insert line into L1D cache
-; Input: RDI = address, RSI = data pointer
-l1d_insert:
-    push rbp
-    mov rbp, rsp
-    push rbx
-    push rcx
-    push rdx
-    push r8
-    push r9
-    push r10
-    
-    ; Calculate set index
-    mov rax, rdi
-    shr rax, 6              ; Divide by line size
-    and rax, (L1_SETS - 1)  ; Modulo number of sets
-    mov r8, rax             ; Save set index
-    
-    ; Calculate tag
-    mov r9, rdi
-    shr r9, 6 + 7           ; Remove offset and index bits
-    
-    ; Find victim way (LRU)
-    call find_lru_way_l1d
-    mov r10, rax            ; Save victim way
-    
-    ; Calculate index into arrays
-    mov rax, r8
-    shl rax, 2              ; Multiply by L1_WAYS
-    add rax, r10
-    
-    ; Check if dirty and evict if needed
-    movzx edx, byte [l1d_state + rax]
-    test dl, CACHE_DIRTY
-    jz .no_writeback
-    
-    ; Perform writeback
-    inc qword [cache_writebacks]
-    call writeback_l1d_line
-    
-.no_writeback:
-    ; Update tag
-    mov [l1d_tags + rax * 8], r9
-    
-    ; Update state
-    mov byte [l1d_state + rax], CACHE_VALID
-    
-    ; Update LRU
-    mov byte [l1d_lru + rax], 0
-    call update_lru_l1d
-    
-    ; Copy data to cache
-    mov rdx, rdi
-    and rdx, -64            ; Align to cache line
-    
-    ; Calculate data offset
-    mov rax, r8
-    shl rax, 8              ; Set * 256
-    mov rbx, r10
-    shl rbx, 6              ; Way * 64
-    add rax, rbx
-    
-    ; Copy 64 bytes
-    lea rdi, [l1d_data + rax]
-    mov rcx, 8
-    rep movsq
-    
-    pop r10
-    pop r9
-    pop r8
-    pop rdx
-    pop rcx
-    pop rbx
-    pop rbp
-    ret
-
-; Insert line into L2 cache
-; Input: RDI = address, RSI = data pointer
-l2_insert:
-    push rbp
-    mov rbp, rsp
-    push rbx
-    push rcx
-    push rdx
-    push r8
-    push r9
-    push r10
-    
-    ; Calculate set index
-    mov rax, rdi
-    shr rax, 6              ; Divide by line size
-    and rax, (L2_SETS - 1)  ; Modulo number of sets
-    mov r8, rax             ; Save set index
-    
-    ; Calculate tag
-    mov r9, rdi
-    shr r9, 6 + 9           ; Remove offset and index bits
-    
-    ; Find victim way (LRU)
-    call find_lru_way_l2
-    mov r10, rax            ; Save victim way
-    
-    ; Calculate index into arrays
-    mov rax, r8
-    shl rax, 3              ; Multiply by L2_WAYS
-    add rax, r10
-    
-    ; Check if dirty and evict if needed
-    movzx edx, byte [l2_state + rax]
-    test dl, CACHE_DIRTY
-    jz .no_writeback
-    
-    ; Perform writeback
-    inc qword [cache_writebacks + 8]
-    call writeback_l2_line
-    
-.no_writeback:
-    ; Update tag
-    mov [l2_tags + rax * 8], r9
-    
-    ; Update state
-    mov byte [l2_state + rax], CACHE_VALID
-    
-    ; Update LRU
-    mov byte [l2_lru + rax], 0
-    call update_lru_l2
-    
-    ; Copy data to cache
-    mov rdx, rdi
-    and rdx, -64            ; Align to cache line
-    
-    ; Calculate data offset
-    mov rax, r8
-    shl rax, 9              ; Set * 512
-    mov rbx, r10
-    shl rbx, 6              ; Way * 64
-    add rax, rbx
-    
-    ; Copy 64 bytes
-    lea rdi, [l2_data + rax]
-    mov rcx, 8
-    rep movsq
-    
-    pop r10
-    pop r9
-    pop r8
-    pop rdx
-    pop rcx
+    pop r14
+    pop r13
+    pop r12
     pop rbx
     pop rbp
     ret
 
 ; Update cache line
-; Input: RDI = address, RSI = data, RDX = size, RCX = cache type
+; Input: RDI = address, RSI = data pointer, RDX = cache type
+; Output: RAX = 0 on success, error code otherwise
 cache_update:
     push rbp
     mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
     
-    ; For now, just invalidate the line
-    call cache_invalidate
+    mov r12, rdi  ; Address
+    mov r13, rsi  ; Data pointer
+    mov r14, rdx  ; Cache type
     
+    ; Try to find existing cache line
+    mov rdi, r12
+    mov rsi, r14
+    call cache_lookup
+    test rax, rax
+    jnz .update_existing
+    
+    ; Cache miss - allocate new line
+    mov rdi, r12
+    mov rsi, r14
+    call allocate_cache_line
+    test rax, rax
+    jz .error
+    
+.update_existing:
+    mov r15, rax  ; Cache line pointer
+    
+    ; Copy data to cache line
+    mov rdi, r15
+    add rdi, cache_line.data
+    mov rsi, r13
+    mov rdx, CACHE_LINE_SIZE
+    call memcpy
+    
+    ; Set tag and valid bit
+    mov rax, r12
+    shr rax, CACHE_LINE_SHIFT
+    
+    ; Set tag based on cache type
+    cmp r14, 0
+    je .set_l1i_tag
+    cmp r14, 1
+    je .set_l1d_tag
+    cmp r14, 2
+    je .set_l2_tag
+    
+.set_l1i_tag:
+    shr rax, L1I_SET_SHIFT
+    jmp .store_tag
+    
+.set_l1d_tag:
+    shr rax, L1D_SET_SHIFT
+    jmp .store_tag
+    
+.set_l2_tag:
+    shr rax, L2_SET_SHIFT
+    
+.store_tag:
+    mov [r15 + cache_line.tag], rax
+    mov byte [r15 + cache_line.valid], 1
+    
+    ; Update LRU
+    mov rdi, r15
+    call update_lru
+    
+    xor eax, eax
+    jmp .done
+    
+.error:
+    mov eax, -1
+    
+.done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
     pop rbp
     ret
 
-; Flush entire cache
-cache_flush:
+; Allocate cache line (evict if necessary)
+; Input: RDI = address, RSI = cache type
+; Output: RAX = pointer to cache line (0 if error)
+allocate_cache_line:
     push rbp
     mov rbp, rsp
     push rbx
-    push rcx
-    push rdx
+    push r12
+    push r13
+    push r14
+    push r15
     
-    ; Flush L1D (writebacks if dirty)
-    xor ecx, ecx
-.flush_l1d:
-    movzx edx, byte [l1d_state + rcx]
-    test dl, CACHE_DIRTY
-    jz .next_l1d
+    mov r12, rdi  ; Address
+    mov r13, rsi  ; Cache type
     
-    mov rax, rcx
-    call writeback_l1d_line
+    ; Calculate set index
+    mov rax, r12
+    shr rax, CACHE_LINE_SHIFT
     
-.next_l1d:
-    inc ecx
-    cmp ecx, L1_SETS * L1_WAYS
-    jl .flush_l1d
+    ; Select cache based on type
+    cmp r13, 0
+    je .alloc_l1i
+    cmp r13, 1
+    je .alloc_l1d
+    cmp r13, 2
+    je .alloc_l2
+    jmp .error
     
-    ; Flush L2
-    xor ecx, ecx
-.flush_l2:
-    movzx edx, byte [l2_state + rcx]
-    test dl, CACHE_DIRTY
-    jz .next_l2
+.alloc_l1i:
+    and rax, (L1I_SETS - 1)
+    mov rbx, rax
+    shl rbx, L1I_WAYS
+    shl rbx, CACHE_LINE_SHIFT
+    lea rbx, [cache_state + cache_state.lines + rbx]
+    mov r14, L1I_WAYS
+    jmp .find_victim
     
-    mov rax, rcx
-    call writeback_l2_line
+.alloc_l1d:
+    and rax, (L1D_SETS - 1)
+    mov rbx, rax
+    shl rbx, L1D_WAYS
+    shl rbx, CACHE_LINE_SHIFT
+    lea rbx, [cache_state + cache_state.l1d_lines + rbx]
+    mov r14, L1D_WAYS
+    jmp .find_victim
     
-.next_l2:
-    inc ecx
-    cmp ecx, L2_SETS * L2_WAYS
-    jl .flush_l2
+.alloc_l2:
+    and rax, (L2_SETS - 1)
+    mov rbx, rax
+    shl rbx, L2_WAYS
+    shl rbx, CACHE_LINE_SHIFT
+    lea rbx, [cache_state + cache_state.l2_lines + rbx]
+    mov r14, L2_WAYS
     
-    ; Invalidate all caches
-    call cache_invalidate_all
+.find_victim:
+    ; Find invalid line or LRU victim
+    mov rcx, r14
+    mov r15, 0  ; Way counter
     
-    pop rdx
-    pop rcx
+.search_invalid:
+    lea rdi, [rbx + r15 * cache_line_size]
+    cmp byte [rdi + cache_line.valid], 0
+    je .found_victim
+    
+    inc r15
+    loop .search_invalid
+    
+    ; All lines valid - find LRU victim
+    mov rcx, r14
+    mov r15, 0
+    mov rdx, 0xFF  ; Max LRU value
+    
+.find_lru:
+    lea rdi, [rbx + r15 * cache_line_size]
+    movzx eax, byte [rdi + cache_line.lru]
+    cmp al, dl
+    cmovb rdx, rax
+    cmovb r15, rcx
+    
+    inc r15
+    loop .find_lru
+    
+    ; Use way 0 as fallback
+    mov r15, 0
+    
+.found_victim:
+    lea rax, [rbx + r15 * cache_line_size]
+    
+    ; Write back if dirty
+    cmp byte [rax + cache_line.dirty], 0
+    je .no_writeback
+    
+    ; Write back to memory (simplified)
+    ; In real implementation, would write to L2 or memory
+    
+.no_writeback:
+    ; Clear the line
+    mov byte [rax + cache_line.valid], 0
+    mov byte [rax + cache_line.dirty], 0
+    mov byte [rax + cache_line.lru], 0
+    
+    jmp .done
+    
+.error:
+    xor eax, eax
+    
+.done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+
+; Update LRU counter for cache line
+; Input: RDI = cache line pointer
+update_lru:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    
+    mov r12, rdi  ; Cache line pointer
+    
+    ; Find which set this line belongs to
+    lea rbx, [cache_state + cache_state.lines]
+    sub r12, rbx
+    cmp r12, L1I_SIZE
+    jb .l1i_lru
+    
+    lea rbx, [cache_state + cache_state.l1d_lines]
+    sub r12, rbx
+    cmp r12, L1D_SIZE
+    jb .l1d_lru
+    
+    lea rbx, [cache_state + cache_state.l2_lines]
+    sub r12, rbx
+    jmp .l2_lru
+    
+.l1i_lru:
+    ; L1I LRU update
+    mov rax, r12
+    shr rax, CACHE_LINE_SHIFT
+    and rax, (L1I_SETS - 1)
+    shl rax, L1I_WAYS
+    shl rax, CACHE_LINE_SHIFT
+    lea rbx, [cache_state + cache_state.lines + rax]
+    mov r13, L1I_WAYS
+    jmp .update_lru_set
+    
+.l1d_lru:
+    ; L1D LRU update
+    mov rax, r12
+    shr rax, CACHE_LINE_SHIFT
+    and rax, (L1D_SETS - 1)
+    shl rax, L1D_WAYS
+    shl rax, CACHE_LINE_SHIFT
+    lea rbx, [cache_state + cache_state.l1d_lines + rax]
+    mov r13, L1D_WAYS
+    jmp .update_lru_set
+    
+.l2_lru:
+    ; L2 LRU update
+    mov rax, r12
+    shr rax, CACHE_LINE_SHIFT
+    and rax, (L2_SETS - 1)
+    shl rax, L2_WAYS
+    shl rax, CACHE_LINE_SHIFT
+    lea rbx, [cache_state + cache_state.l2_lines + rax]
+    mov r13, L2_WAYS
+    
+.update_lru_set:
+    ; Calculate which way this line is
+    sub r12, rbx
+    shr r12, CACHE_LINE_SHIFT
+    and r12, (r13 - 1)
+    
+    ; Increment LRU counters for all other ways
+    mov rcx, r13
+    mov rdx, 0
+    
+.lru_loop:
+    cmp rdx, r12
+    je .skip_way
+    
+    lea rdi, [rbx + rdx * cache_line_size]
+    inc byte [rdi + cache_line.lru]
+    
+.skip_way:
+    inc rdx
+    loop .lru_loop
+    
+    ; Set this way's LRU to 0
+    lea rdi, [rbx + r12 * cache_line_size]
+    mov byte [rdi + cache_line.lru], 0
+    
+    pop r13
+    pop r12
     pop rbx
     pop rbp
     ret
 
 ; Invalidate cache line
-; Input: RDI = address
+; Input: RDI = address, RSI = cache type
 cache_invalidate:
     push rbp
     mov rbp, rsp
+    push rbx
     
-    ; Invalidate in all caches
-    call invalidate_l1i_line
-    call invalidate_l1d_line
-    call invalidate_l2_line
+    ; Look up the cache line
+    call cache_lookup
+    test rax, rax
+    jz .not_found
     
+    ; Invalidate it
+    mov byte [rax + cache_line.valid], 0
+    mov byte [rax + cache_line.dirty], 0
+    
+    ; Update statistics
+    lea rbx, [cache_state + cache_state.stats]
+    inc qword [rbx + STAT_INVALIDATES * 8]
+    
+.not_found:
+    pop rbx
     pop rbp
     ret
 
-; Invalidate all caches
-cache_invalidate_all:
-    push rdi
-    push rcx
-    
-    ; Clear state arrays
-    lea rdi, [l1i_state]
-    xor eax, eax
-    mov ecx, L1_SETS * L1_WAYS
-    rep stosb
-    
-    lea rdi, [l1d_state]
-    mov ecx, L1_SETS * L1_WAYS
-    rep stosb
-    
-    lea rdi, [l2_state]
-    mov ecx, L2_SETS * L2_WAYS
-    rep stosb
-    
-    pop rcx
-    pop rdi
-    ret
-
-; Find LRU way in L1I set
-; Input: R8 = set index
-; Output: RAX = way index
-find_lru_way_l1i:
-    push rcx
-    push rdx
-    
-    mov rax, r8
-    shl rax, 2              ; Base index
-    
-    ; Find way with highest LRU counter
-    xor ecx, ecx            ; Best way
-    mov dl, 0               ; Best LRU value
-    
-    push rax
-    xor eax, eax
-.search:
-    mov dh, [l1i_lru + rax]
-    cmp dh, dl
-    jbe .next
-    mov dl, dh
-    mov ecx, eax
-    pop rax
-    push rax
-    sub ecx, eax
-    
-.next:
-    inc eax
-    cmp eax, L1_WAYS
-    jl .search
-    
-    pop rax
-    mov eax, ecx
-    
-    pop rdx
-    pop rcx
-    ret
-
-; Find LRU way in L1D set
-; Input: R8 = set index
-; Output: RAX = way index
-find_lru_way_l1d:
-    push rcx
-    push rdx
-    
-    mov rax, r8
-    shl rax, 2              ; Base index
-    
-    ; Find way with highest LRU counter
-    xor ecx, ecx            ; Best way
-    mov dl, 0               ; Best LRU value
-    
-    push rax
-    xor eax, eax
-.search:
-    mov dh, [l1d_lru + rax]
-    cmp dh, dl
-    jbe .next
-    mov dl, dh
-    mov ecx, eax
-    pop rax
-    push rax
-    sub ecx, eax
-    
-.next:
-    inc eax
-    cmp eax, L1_WAYS
-    jl .search
-    
-    pop rax
-    mov eax, ecx
-    
-    pop rdx
-    pop rcx
-    ret
-
-; Find LRU way in L2 set
-; Input: R8 = set index
-; Output: RAX = way index
-find_lru_way_l2:
-    push rcx
-    push rdx
-    
-    mov rax, r8
-    shl rax, 3              ; Base index
-    
-    ; Find way with highest LRU counter
-    xor ecx, ecx            ; Best way
-    mov dl, 0               ; Best LRU value
-    
-    push rax
-    xor eax, eax
-.search:
-    mov dh, [l2_lru + rax]
-    cmp dh, dl
-    jbe .next
-    mov dl, dh
-    mov ecx, eax
-    pop rax
-    push rax
-    sub ecx, eax
-    
-.next:
-    inc eax
-    cmp eax, L2_WAYS
-    jl .search
-    
-    pop rax
-    mov eax, ecx
-    
-    pop rdx
-    pop rcx
-    ret
-
-; Update LRU counters for L1I
-; Input: R8 = set index, RAX = accessed way
-update_lru_l1i:
-    push rcx
-    push rax
-    
-    mov rcx, r8
-    shl rcx, 2              ; Base index
-    
-    ; Increment all other ways' LRU counters
-    xor eax, eax
-.update:
-    cmp eax, [rsp]          ; Compare with accessed way
-    je .skip
-    inc byte [l1i_lru + rcx + rax]
-.skip:
-    inc eax
-    cmp eax, L1_WAYS
-    jl .update
-    
-    pop rax
-    pop rcx
-    ret
-
-; Update LRU counters for L1D
-; Input: R8 = set index, RAX = accessed way
-update_lru_l1d:
-    push rcx
-    push rax
-    
-    mov rcx, r8
-    shl rcx, 2              ; Base index
-    
-    ; Increment all other ways' LRU counters
-    xor eax, eax
-.update:
-    cmp eax, [rsp]          ; Compare with accessed way
-    je .skip
-    inc byte [l1d_lru + rcx + rax]
-.skip:
-    inc eax
-    cmp eax, L1_WAYS
-    jl .update
-    
-    pop rax
-    pop rcx
-    ret
-
-; Update LRU counters for L2
-; Input: R8 = set index, RAX = accessed way
-update_lru_l2:
-    push rcx
-    push rax
-    
-    mov rcx, r8
-    shl rcx, 3              ; Base index
-    
-    ; Increment all other ways' LRU counters
-    xor eax, eax
-.update:
-    cmp eax, [rsp]          ; Compare with accessed way
-    je .skip
-    inc byte [l2_lru + rcx + rax]
-.skip:
-    inc eax
-    cmp eax, L2_WAYS
-    jl .update
-    
-    pop rax
-    pop rcx
-    ret
-
-; Writeback L1D cache line
-; Input: RAX = absolute index
-writeback_l1d_line:
+; Flush entire cache
+; Input: RDI = cache type (0=all, 1=L1I, 2=L1D, 3=L2)
+cache_flush:
     push rbp
     mov rbp, rsp
-    push rax
     push rbx
-    push rcx
-    push rdx
-    push rdi
-    push rsi
+    push r12
+    push r13
     
-    ; Get tag and reconstruct address
-    mov rbx, [l1d_tags + rax * 8]
-    mov rcx, rax
-    shr rcx, 2              ; Get set index
-    shl rbx, 6 + 7          ; Shift tag back
-    shl rcx, 6              ; Shift set index
-    or rbx, rcx             ; Combine to get address
+    mov r12, rdi  ; Cache type
     
-    ; Calculate data offset
-    mov rdx, rax
-    and rdx, 3              ; Way within set
-    shr rax, 2              ; Set index
-    shl rax, 8              ; Set * 256
-    shl rdx, 6              ; Way * 64
-    add rax, rdx
+    ; Flush L1I
+    cmp r12, 0
+    je .flush_l1i
+    cmp r12, 1
+    je .flush_l1i
+    jmp .check_l1d
     
-    ; Write back to memory
-    mov rdi, rbx            ; Address
-    lea rsi, [l1d_data + rax]  ; Data
-    mov rdx, 64             ; Size
-    call memory_write
+.flush_l1i:
+    lea rbx, [cache_state + cache_state.lines]
+    mov rcx, L1I_SETS * L1I_WAYS
     
-    pop rsi
-    pop rdi
-    pop rdx
-    pop rcx
+.flush_l1i_loop:
+    mov byte [rbx + cache_line.valid], 0
+    mov byte [rbx + cache_line.dirty], 0
+    mov byte [rbx + cache_line.lru], 0
+    add rbx, cache_line_size
+    loop .flush_l1i_loop
+    
+.check_l1d:
+    ; Flush L1D
+    cmp r12, 0
+    je .flush_l1d
+    cmp r12, 2
+    je .flush_l1d
+    jmp .check_l2
+    
+.flush_l1d:
+    lea rbx, [cache_state + cache_state.l1d_lines]
+    mov rcx, L1D_SETS * L1D_WAYS
+    
+.flush_l1d_loop:
+    mov byte [rbx + cache_line.valid], 0
+    mov byte [rbx + cache_line.dirty], 0
+    mov byte [rbx + cache_line.lru], 0
+    add rbx, cache_line_size
+    loop .flush_l1d_loop
+    
+.check_l2:
+    ; Flush L2
+    cmp r12, 0
+    je .flush_l2
+    cmp r12, 3
+    je .flush_l2
+    jmp .done
+    
+.flush_l2:
+    lea rbx, [cache_state + cache_state.l2_lines]
+    mov rcx, L2_SETS * L2_WAYS
+    
+.flush_l2_loop:
+    mov byte [rbx + cache_line.valid], 0
+    mov byte [rbx + cache_line.dirty], 0
+    mov byte [rbx + cache_line.lru], 0
+    add rbx, cache_line_size
+    loop .flush_l2_loop
+    
+.done:
+    pop r13
+    pop r12
     pop rbx
-    pop rax
     pop rbp
     ret
 
-; Writeback L2 cache line
-; Input: RAX = absolute index
-writeback_l2_line:
+; Get cache statistics
+; Input: RDI = statistics array pointer
+cache_get_stats:
     push rbp
     mov rbp, rsp
-    push rax
     push rbx
-    push rcx
-    push rdx
-    push rdi
-    push rsi
+    push r12
     
-    ; Get tag and reconstruct address
-    mov rbx, [l2_tags + rax * 8]
-    mov rcx, rax
-    shr rcx, 3              ; Get set index
-    shl rbx, 6 + 9          ; Shift tag back
-    shl rcx, 6              ; Shift set index
-    or rbx, rcx             ; Combine to get address
+    mov r12, rdi  ; Statistics array pointer
     
-    ; Calculate data offset
-    mov rdx, rax
-    and rdx, 7              ; Way within set
-    shr rax, 3              ; Set index
-    shl rax, 9              ; Set * 512
-    shl rdx, 6              ; Way * 64
-    add rax, rdx
+    ; Copy statistics
+    lea rbx, [cache_state + cache_state.stats]
+    mov rcx, 8  ; 8 statistics counters
     
-    ; Write back to memory
-    mov rdi, rbx            ; Address
-    lea rsi, [l2_data + rax]   ; Data
-    mov rdx, 64             ; Size
-    call memory_write
+.copy_stats:
+    mov rax, [rbx + rcx * 8 - 8]
+    mov [r12 + rcx * 8 - 8], rax
+    loop .copy_stats
     
-    pop rsi
-    pop rdi
-    pop rdx
-    pop rcx
+    pop r12
     pop rbx
-    pop rax
     pop rbp
     ret
 
-; Invalidate L1I line
-; Input: RDI = address
-invalidate_l1i_line:
-    push rax
-    push rcx
-    push rdx
-    push r8
-    push r9
-    
-    ; Calculate set index
-    mov rax, rdi
-    shr rax, 6              ; Divide by line size
-    and rax, (L1_SETS - 1)  ; Modulo number of sets
-    mov r8, rax             ; Save set index
-    
-    ; Calculate tag
-    mov r9, rdi
-    shr r9, 6 + 7           ; Remove offset and index bits
-    
-    ; Search all ways in the set
-    xor ecx, ecx            ; Way counter
-.search_ways:
-    ; Calculate index into arrays
-    mov rax, r8
-    shl rax, 2              ; Multiply by L1_WAYS
-    add rax, rcx
-    
-    ; Check tag match
-    mov rdx, [l1i_tags + rax * 8]
-    cmp rdx, r9
-    jne .next_way
-    
-    ; Invalidate
-    mov byte [l1i_state + rax], CACHE_INVALID
-    inc qword [cache_evictions]
-    jmp .done
-    
-.next_way:
-    inc ecx
-    cmp ecx, L1_WAYS
-    jl .search_ways
-    
-.done:
-    pop r9
-    pop r8
-    pop rdx
-    pop rcx
-    pop rax
-    ret
-
-; Invalidate L1D line
-; Input: RDI = address
-invalidate_l1d_line:
-    push rax
-    push rcx
-    push rdx
-    push r8
-    push r9
-    
-    ; Calculate set index
-    mov rax, rdi
-    shr rax, 6              ; Divide by line size
-    and rax, (L1_SETS - 1)  ; Modulo number of sets
-    mov r8, rax             ; Save set index
-    
-    ; Calculate tag
-    mov r9, rdi
-    shr r9, 6 + 7           ; Remove offset and index bits
-    
-    ; Search all ways in the set
-    xor ecx, ecx            ; Way counter
-.search_ways:
-    ; Calculate index into arrays
-    mov rax, r8
-    shl rax, 2              ; Multiply by L1_WAYS
-    add rax, rcx
-    
-    ; Check tag match
-    mov rdx, [l1d_tags + rax * 8]
-    cmp rdx, r9
-    jne .next_way
-    
-    ; Check if dirty
-    movzx edx, byte [l1d_state + rax]
-    test dl, CACHE_DIRTY
-    jz .invalidate
-    
-    ; Writeback if dirty
-    call writeback_l1d_line
-    
-.invalidate:
-    ; Invalidate
-    mov byte [l1d_state + rax], CACHE_INVALID
-    inc qword [cache_evictions + 8]
-    jmp .done
-    
-.next_way:
-    inc ecx
-    cmp ecx, L1_WAYS
-    jl .search_ways
-    
-.done:
-    pop r9
-    pop r8
-    pop rdx
-    pop rcx
-    pop rax
-    ret
-
-; Invalidate L2 line
-; Input: RDI = address
-invalidate_l2_line:
-    push rax
-    push rcx
-    push rdx
-    push r8
-    push r9
-    
-    ; Calculate set index
-    mov rax, rdi
-    shr rax, 6              ; Divide by line size
-    and rax, (L2_SETS - 1)  ; Modulo number of sets
-    mov r8, rax             ; Save set index
-    
-    ; Calculate tag
-    mov r9, rdi
-    shr r9, 6 + 9           ; Remove offset and index bits
-    
-    ; Search all ways in the set
-    xor ecx, ecx            ; Way counter
-.search_ways:
-    ; Calculate index into arrays
-    mov rax, r8
-    shl rax, 3              ; Multiply by L2_WAYS
-    add rax, rcx
-    
-    ; Check tag match
-    mov rdx, [l2_tags + rax * 8]
-    cmp rdx, r9
-    jne .next_way
-    
-    ; Check if dirty
-    movzx edx, byte [l2_state + rax]
-    test dl, CACHE_DIRTY
-    jz .invalidate
-    
-    ; Writeback if dirty
-    call writeback_l2_line
-    
-.invalidate:
-    ; Invalidate
-    mov byte [l2_state + rax], CACHE_INVALID
-    inc qword [cache_evictions + 16]
-    jmp .done
-    
-.next_way:
-    inc ecx
-    cmp ecx, L2_WAYS
-    jl .search_ways
-    
-.done:
-    pop r9
-    pop r8
-    pop rdx
-    pop rcx
-    pop rax
-    ret
-
-; Update prefetcher based on access pattern
-; Input: RDI = current address
-update_prefetcher:
-    push rax
+; Memory copy function (simplified)
+memcpy:
+    push rbp
+    mov rbp, rsp
     push rbx
     push rcx
-    push rdx
     
-    ; Calculate stride
-    mov rax, rdi
-    sub rax, [prefetch_last_addr]
+    mov rbx, rdi  ; Destination
+    mov rcx, rdx  ; Count
     
-    ; Check if stride matches
-    cmp rax, [prefetch_stride]
-    jne .new_pattern
+    ; Copy bytes
+    rep movsb
     
-    ; Increase confidence
-    inc byte [prefetch_confidence]
-    cmp byte [prefetch_confidence], 3
-    jl .update_last
-    
-    ; High confidence - issue prefetch
-    mov rbx, rdi
-    add rbx, rax            ; Next predicted address
-    
-    ; Prefetch into L2
-    mov rdi, rbx
-    call prefetch_to_l2
-    
-    jmp .update_last
-    
-.new_pattern:
-    ; New stride detected
-    mov [prefetch_stride], rax
-    mov byte [prefetch_confidence], 1
-    
-.update_last:
-    mov [prefetch_last_addr], rdi
-    
-    pop rdx
     pop rcx
     pop rbx
-    pop rax
-    ret
-
-; Prefetch address to L2
-; Input: RDI = address
-prefetch_to_l2:
-    push rax
-    push rcx
-    push rsi
-    
-    ; Check if already in L2
-    call l2_lookup
-    test rcx, rcx
-    jnz .done               ; Already cached
-    
-    ; Load from memory
-    mov rsi, rdi
-    and rsi, -64            ; Align to cache line
-    call memory_read
-    
-    ; Insert into L2
-    ; RSI already has data pointer
-    call l2_insert
-    
-    inc qword [cache_hits + 24]  ; Prefetch hits
-    
-.done:
-    pop rsi
-    pop rcx
-    pop rax
-    ret
-
-; Enable prefetcher
-prefetch_enable:
-    mov byte [prefetch_enabled], 1
-    ret
-
-; Disable prefetcher
-prefetch_disable:
-    mov byte [prefetch_enabled], 0
+    pop rbp
     ret

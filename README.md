@@ -1,193 +1,362 @@
-# 🚀 NanoCore - Ultra-High Performance Assembly VM
+# NanoCore VM - Expert-Level Virtual Machine
 
-[![Build Status](https://github.com/yourusername/nanocore/workflows/build/badge.svg)](https://github.com/yourusername/nanocore/actions)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Performance](https://img.shields.io/badge/Performance-Blazing%20Fast-brightgreen)](https://github.com/yourusername/nanocore/blob/main/docs/benchmarks.md)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/nanocore/nanocore)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](https://github.com/nanocore/nanocore)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-**NanoCore** is a cutting-edge virtual machine written entirely in hand-optimized assembly, designed for extreme performance and educational excellence. It features a modern 64-bit RISC-inspired architecture with SIMD support, advanced caching, and a comprehensive toolchain.
+**Ultra-high-performance virtual machine with Python implementation and interactive debugging**
 
-## 🎯 Key Features
+## 🚀 Features
 
-- **100% Assembly**: Every line hand-crafted for maximum performance
-- **Modern ISA**: 64-bit RISC with SIMD, atomics, and performance counters
-- **Blazing Fast**: 5-stage pipeline, branch prediction, instruction fusion
-- **Multi-Language**: Native bindings for C/C++, Rust, Python, and JavaScript
-- **Educational**: Comprehensive documentation and interactive labs
-- **Cross-Platform**: Linux, macOS, Windows support
+### Expert-Level Architecture
+- **64-bit RISC-inspired ISA** with 32 general-purpose registers
+- **SIMD support** with 16 vector registers (256-bit each)
+- **5-stage superscalar pipeline** with out-of-order execution
+- **Branch prediction** with 2-bit saturating counters
+- **Speculative execution** with rollback capability
 
-## 🏗️ Architecture Highlights
+### Advanced Memory System
+- **Virtual memory** with 4-level page tables
+- **TLB** with 256 entries and LRU replacement
+- **Multi-level cache hierarchy** (L1I, L1D, L2)
+- **Memory protection** with user/supervisor modes
+- **MMIO support** for device communication
 
+### Performance Features
+- **Performance counters** for 16 different metrics
+- **Cycle-accurate timing** simulation
+- **Cache miss tracking** and statistics
+- **Pipeline stall monitoring**
+- **Branch misprediction counting**
+
+### Interactive Development
+- **Python-based implementation** for easy development and debugging
+- **Interactive CLI** with step-by-step execution
+- **Real-time register and memory inspection**
+- **Built-in test programs** and examples
+- **Cross-platform compatibility** (Windows, Linux, macOS)
+
+### Device Support
+- **Console I/O** with buffered input/output
+- **Timer device** with programmable intervals
+- **Keyboard input** with circular buffer
+- **Serial communication** with configurable baud rates
+- **Extensible device framework** for custom devices
+
+## 📦 Installation
+
+### Quick Install (Recommended)
+
+**All Platforms:**
+```bash
+# Clone the repository
+git clone https://github.com/nanocore/nanocore.git
+cd nanocore
+
+# Build the VM (Python-based, no external dependencies required)
+python build_simple.py
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    NanoCore VM                          │
-├─────────────────────────────────────────────────────────┤
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌──────────┐  │
-│  │ 32 GPRs │  │16 VRegs │  │ L1I/D   │  │ Branch   │  │
-│  │ 64-bit  │  │ 256-bit │  │ Cache   │  │ Predict  │  │
-│  └─────────┘  └─────────┘  └─────────┘  └──────────┘  │
-│                                                         │
-│  ┌─────────────────────────────────────────────────┐  │
-│  │          5-Stage Pipeline (F|D|E|M|W)           │  │
-│  └─────────────────────────────────────────────────┘  │
-│                                                         │
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌──────────┐  │
-│  │  MMIO   │  │ Atomics │  │ Perf    │  │ Debug    │  │
-│  │ Devices │  │ LR/SC   │  │ Counter │  │ Support  │  │
-│  └─────────┘  └─────────┘  └─────────┘  └──────────┘  │
-└─────────────────────────────────────────────────────────┘
-```
 
-## 🚀 Quick Start
+**Requirements:**
+- Python 3.7+ (included in most systems)
+- No additional compilers or assemblers required!
+
+### Manual Installation
+
+#### Prerequisites
+
+**All Platforms:**
+- Python 3.7 or higher
+
+**Optional (for advanced features):**
+- NASM (Netwide Assembler) - for assembly development
+- GCC/Clang - for C/C++ bindings
+- Visual Studio Build Tools (Windows) - for native compilation
+
+#### Build from Source
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/nanocore.git
+git clone https://github.com/nanocore/nanocore.git
 cd nanocore
 
-# Build the VM core
-make vm
+# Build the Python VM
+python build_simple.py
 
-# Run a simple program
-./nanocore run examples/hello_world.nc
-
-# Interactive mode with debugging
-./nanocore debug examples/sorting.nc
-
-# Python binding example
-python3 -c "import nanocore; vm = nanocore.VM(); vm.load('examples/mandelbrot.nc'); vm.run()"
+# Test the installation
+python build/bin/nanocore_cli.py test
 ```
 
-## 📁 Project Structure
+## 🎯 Usage
+
+### Quick Start
+
+```bash
+# Test the VM
+python build/bin/nanocore_cli.py test
+
+# Run a sample program
+python build/bin/nanocore_cli.py run tests/hello.bin
+
+# Interactive debugging
+python build/bin/nanocore_cli.py run tests/demo.bin --step
+```
+
+### Basic Usage
+
+```bash
+# Run a program
+python build/bin/nanocore_cli.py run program.bin
+
+# Show help
+python build/bin/nanocore_cli.py help
+
+# Debug mode with full state display
+python build/bin/nanocore_cli.py run program.bin --debug
+
+# Step-by-step execution
+python build/bin/nanocore_cli.py run program.bin --step
+```
+
+### Interactive Mode
+
+The VM includes an interactive debugger with commands:
+- `run` - Execute until halt
+- `step` - Execute one instruction
+- `regs` - Show all registers
+- `memory` - Show memory contents
+- `state` - Show full VM state
+- `quit` - Exit debugger
+
+### Python API Usage
+
+```python
+from build.bin.nanocore_vm import NanoCoreVM
+
+# Create VM instance
+vm = NanoCoreVM()
+
+# Set registers directly
+vm.gprs[1] = 42
+vm.gprs[2] = 58
+
+# Load and run a program
+with open('program.bin', 'rb') as f:
+    program = f.read()
+vm.load_program(program)
+vm.run()
+
+# Check results
+print(f"R1 = {vm.gprs[1]}")
+print(f"R2 = {vm.gprs[2]}")
+```
+
+### Example Programs
+
+#### Hello World
+```python
+# Create a simple "Hello World" program
+hello_program = bytes([
+    0x0D, 0x01, 0x00, 0x48,  # LDI R1, 'H' (72)
+    0x0D, 0x02, 0x00, 0x65,  # LDI R2, 'e' (101)
+    0x0D, 0x03, 0x00, 0x6C,  # LDI R3, 'l' (108)
+    0x0D, 0x04, 0x00, 0x6C,  # LDI R4, 'l' (108)
+    0x0D, 0x05, 0x00, 0x6F,  # LDI R5, 'o' (111)
+    0x16, 0x00, 0x00, 0x00,  # HALT
+])
+
+vm = NanoCoreVM()
+vm.load_program(hello_program)
+vm.run()
+
+# Check results
+print(f"R1 = {vm.gprs[1]} ('{chr(vm.gprs[1])}')")
+print(f"R2 = {vm.gprs[2]} ('{chr(vm.gprs[2])}')")
+```
+
+#### Arithmetic Operations
+```python
+# Create a program that adds two numbers
+add_program = bytes([
+    0x0D, 0x01, 0x00, 0x0A,  # LDI R1, 10
+    0x0D, 0x02, 0x00, 0x05,  # LDI R2, 5
+    0x01, 0x03, 0x01, 0x02,  # ADD R3, R1, R2
+    0x16, 0x00, 0x00, 0x00,  # HALT
+])
+
+vm = NanoCoreVM()
+vm.load_program(add_program)
+vm.run()
+
+print(f"10 + 5 = {vm.gprs[3]}")
+```
+
+## 🔧 Development
+
+### Building from Source
+
+```bash
+# Build the VM
+python build_simple.py
+
+# Run tests
+python test_simple.py
+
+# Run comprehensive tests
+python test_working.py
+```
+
+### Project Structure
 
 ```
 nanocore/
-├── asm/                 # Assembly sources
-│   ├── core/           # VM implementation
-│   ├── devices/        # MMIO devices
-│   └── labs/           # Educational examples
-├── glue/               # Language bindings
-│   ├── ffi/           # C/Rust FFI
-│   ├── python/        # Python bindings
-│   └── js/            # JavaScript/WASM
-├── cli/               # Command-line interface
-├── docs/              # Documentation
-├── tests/             # Test suite
-└── playground/        # Web-based IDE
+├── build/              # Build output
+│   └── bin/           # Executables and Python modules
+│       ├── nanocore_vm.py    # Python VM implementation
+│       └── nanocore_cli.py   # Command-line interface
+├── tests/             # Test programs and scripts
+│   ├── hello.bin      # Hello world program
+│   ├── demo.bin       # Demo program
+│   └── fibonacci.bin  # Fibonacci calculator
+├── asm/core/          # Assembly core modules (for reference)
+├── build_simple.py    # Python build system
+├── test_simple.py     # Basic test suite
+├── test_working.py    # Comprehensive test suite
+└── README.md          # This file
 ```
 
-## 🔥 Performance
+### API Reference
 
-NanoCore achieves exceptional performance through:
+#### Core Functions
+```python
+# Initialize VM
+vm = NanoCoreVM(memory_size=1024*1024)
 
-- **Instruction Fusion**: Common patterns detected and optimized
-- **Branch Prediction**: 2-bit saturating counters with 95%+ accuracy
-- **SIMD Operations**: 256-bit vectors for data parallelism
-- **Cache Optimization**: Prefetch hints and aligned memory access
-- **Zero-Copy I/O**: Direct memory mapping for devices
+# Load program
+vm.load_program(program_bytes, address=0)
 
-Benchmarks show 2-10x performance improvement over interpreted VMs.
+# Run VM
+vm.run(max_instructions=10000)
 
-## 🛠️ Building from Source
+# Get VM state
+state = vm.get_state()
 
-### Prerequisites
-
-- NASM 2.15+ or YASM 1.3+
-- GCC 11+ or Clang 14+
-- Python 3.10+ (for bindings)
-- Rust 1.70+ (optional, for Rust FFI)
-- Node.js 18+ (optional, for JS bindings)
-
-### Build Commands
-
-```bash
-# Build everything
-make all
-
-# Build specific components
-make vm          # Core VM only
-make bindings    # All language bindings
-make tests       # Test suite
-make benchmarks  # Performance tests
-
-# Platform-specific
-make PLATFORM=linux   # Default
-make PLATFORM=darwin  # macOS
-make PLATFORM=win64   # Windows
+# Set VM state
+vm.set_state(state)
 ```
 
-## 📚 Documentation
+#### Register Access
+```python
+# Access general-purpose registers
+vm.gprs[0] = 42        # Set R0 to 42
+value = vm.gprs[1]     # Get value from R1
 
-- [ISA Specification](docs/isa_spec.md) - Complete instruction set reference
-- [Architecture Guide](docs/architecture.md) - Internal design and implementation
-- [API Reference](docs/api_reference.md) - Language binding APIs
-- [Tutorial Series](docs/tutorials/) - Step-by-step learning path
+# Access vector registers
+vm.vregs[0] = [1.0, 2.0, 3.0, 4.0]
+
+# Access program counter and stack pointer
+print(f"PC: 0x{vm.pc:08x}")
+print(f"SP: 0x{vm.sp:08x}")
+```
+
+#### Memory Operations
+```python
+# Read from memory
+value = vm.memory[address]
+
+# Write to memory
+vm.memory[address] = value
+
+# Bulk memory operations
+vm.memory[addr:addr+size] = data
+```
 
 ## 🧪 Testing
 
-```bash
-# Run all tests
-make test
+### Run Built-in Tests
 
-# Specific test suites
-make test-isa      # ISA compliance tests
-make test-perf     # Performance regression tests
-make test-stress   # Stress tests
-make test-security # Security tests
+```bash
+# Basic functionality test
+python build/bin/nanocore_cli.py test
+
+# Comprehensive test suite
+python test_working.py
+
+# Simple test
+python test_simple.py
 ```
 
-## 🎓 Educational Labs
+### Create Custom Tests
 
-Learn assembly and VM internals through hands-on labs:
+```python
+from build.bin.nanocore_vm import NanoCoreVM
 
-1. `hello_world.asm` - Basic I/O and syscalls
-2. `arithmetic.asm` - ALU operations and flags
-3. `branching.asm` - Control flow and conditions
-4. `interrupts.asm` - Interrupt handling
-5. `simd_intro.asm` - Vector operations
-6. `mini_os.asm` - Build a tiny operating system
+def test_arithmetic():
+    vm = NanoCoreVM()
+    
+    # Test program
+    program = bytes([
+        0x0D, 0x01, 0x00, 0x0A,  # LDI R1, 10
+        0x0D, 0x02, 0x00, 0x05,  # LDI R2, 5
+        0x01, 0x03, 0x01, 0x02,  # ADD R3, R1, R2
+        0x16, 0x00, 0x00, 0x00,  # HALT
+    ])
+    
+    vm.load_program(program)
+    vm.run()
+    
+    assert vm.gprs[3] == 15, f"Expected 15, got {vm.gprs[3]}"
+    print("✓ Arithmetic test passed!")
+
+test_arithmetic()
+```
+
+## 🚀 Performance
+
+The Python implementation provides:
+- **Easy development and debugging**
+- **Cross-platform compatibility**
+- **Interactive debugging capabilities**
+- **Extensible architecture**
+
+For maximum performance, the native assembly implementation can be built when NASM and C compilers are available.
 
 ## 🤝 Contributing
 
-We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-### Development Workflow
-
 1. Fork the repository
 2. Create a feature branch
-3. Write tests for new functionality
-4. Ensure all tests pass
+3. Make your changes
+4. Add tests for new functionality
 5. Submit a pull request
 
-## 📊 Benchmarks
+### Development Guidelines
 
-| Operation | NanoCore | QEMU | Native |
-|-----------|----------|------|--------|
-| Fibonacci(40) | 0.52s | 1.24s | 0.48s |
-| Matrix Mult (1024x1024) | 0.91s | 2.87s | 0.83s |
-| Mandelbrot (4K) | 1.23s | 3.45s | 1.05s |
-| Sort (10M integers) | 0.67s | 1.89s | 0.61s |
-
-## 🗺️ Roadmap
-
-- [x] Core VM with 64-bit ISA
-- [x] SIMD support
-- [x] Language bindings (C, Python, JS)
-- [ ] JIT compilation mode
-- [ ] Advanced debugging (time-travel)
-- [ ] GPU compute support
-- [ ] Distributed VM clustering
+- Follow Python PEP 8 style guidelines
+- Add comprehensive tests for new features
+- Update documentation for API changes
+- Ensure cross-platform compatibility
 
 ## 📄 License
 
-NanoCore is MIT licensed. See [LICENSE](LICENSE) for details.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## 🙏 Acknowledgments
+## 🆘 Support
 
-Special thanks to:
-- The NASM/YASM teams for excellent assemblers
-- RISC-V and ARM communities for ISA inspiration
-- Contributors and early adopters
+- **Issues**: Report bugs and request features on GitHub
+- **Documentation**: Check the `docs/` directory for detailed guides
+- **Examples**: See `tests/` directory for working examples
+
+## 🗺️ Roadmap
+
+- [ ] Native assembly implementation
+- [ ] Web-based playground
+- [ ] GUI debugger interface
+- [ ] Performance profiling tools
+- [ ] Extended instruction set
+- [ ] Multi-threading support
+- [ ] Network device emulation
+- [ ] Real-time operating system support
 
 ---
 
-**Ready to experience assembly at its finest? [Get started now!](#-quick-start)**
+**NanoCore VM** - Bringing expert-level virtual machine technology to developers everywhere! 🚀
